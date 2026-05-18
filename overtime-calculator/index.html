@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <meta name="theme-color" content="#4338ca">
+  <title>حاسبة الأوفر تايم</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%234338ca'/%3E%3Ctext x='50' y='62' text-anchor='middle' font-size='44' fill='white'%3E⏱%3C/text%3E%3C/svg%3E">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1><span class="icon"></span>حاسبة الأوفر تايم</h1>
+    <p>ارفع فايل الـ attendance الشهري وهيحسب Approved Days و Clarification وساعات السهر تلقائيًا بقواعد QC</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2><span class="step">1</span>ارفع فايل الإكسل</h2>
+      <div class="dropzone" id="dropzone">
+        <span class="upload-icon">📊</span>
+        <p><strong>اضغط هنا</strong> أو اسحب الفايل</p>
+        <p class="hint">صيغة .xlsx فيها أعمدة Day / Date / ID / Name / From / To / Hours / Approved Days / Clarification</p>
+        <input type="file" id="file-input" accept=".xlsx">
+      </div>
+      <div class="actions">
+        <span class="status" id="status"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2><span class="step">2</span>الإعدادات</h2>
+      <div class="settings-grid">
+        <div class="setting">
+          <label>بداية الشيفت</label>
+          <input id="s-shift-start" type="time" value="08:00">
+        </div>
+        <div class="setting">
+          <label>نهاية الشيفت</label>
+          <input id="s-shift-end" type="time" value="16:30">
+        </div>
+        <div class="setting">
+          <label>خصم الـ Break (دقيقة) — للجمعة</label>
+          <input id="s-break" type="number" min="0" max="120" value="30">
+        </div>
+        <div class="setting">
+          <label>الحد الأدنى للأوفر تايم (ساعة)</label>
+          <input id="s-min-ot" type="number" min="0" step="0.5" value="1">
+        </div>
+        <div class="setting">
+          <label>أيام credit يوم الجمعة</label>
+          <input id="s-fri-days" type="number" min="0" max="3" value="2">
+        </div>
+        <div class="setting">
+          <label>أيام credit يوم السبت</label>
+          <input id="s-sat-days" type="number" min="0" max="3" value="1">
+        </div>
+      </div>
+
+      <h3 class="subhead">الأعياد الرسمية <span class="badge" id="holiday-count">٠</span></h3>
+      <div class="holidays-list" id="holidays-list"></div>
+      <div class="add-holiday">
+        <input id="new-hol-date" type="date">
+        <input id="new-hol-name" type="text" placeholder="اسم العيد">
+        <select id="new-hol-days">
+          <option value="1">١ يوم</option>
+          <option value="2" selected>٢ يوم</option>
+          <option value="3">٣ أيام</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" id="btn-add-holiday">+ إضافة عيد</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="preview-section">
+      <h2><span class="step">3</span>النتيجة</h2>
+      <div class="summary-grid" id="summary-grid"></div>
+
+      <div class="employee-filter">
+        <label>عرض موظف:</label>
+        <select id="emp-filter"></select>
+        <div class="spacer"></div>
+        <button class="btn btn-success" id="btn-export" disabled>⬇ تنزيل الفايل</button>
+      </div>
+
+      <div class="preview-table-wrap">
+        <table class="preview" id="preview-table">
+          <thead>
+            <tr>
+              <th>اليوم</th>
+              <th>التاريخ</th>
+              <th>ID</th>
+              <th>الاسم</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Hours</th>
+              <th>Approved</th>
+              <th>Clarif.</th>
+              <th>Sahar</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    HR Tools · Overtime Calculator
+  </footer>
+
+  <script src="holidays.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
