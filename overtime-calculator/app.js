@@ -1,22 +1,36 @@
 // =============================================================================
-// Overtime Calculator — calculation rules
+// Overtime Calculator — calculation rules (derived from confirmed file patterns)
 // =============================================================================
-// Working hours: 08:00 → 16:30 (configurable)
-// - Regular weekday OT: time past 16:30 only, must be ≥ 1 hour
-// - Saturday: like weekday for OT, +1 day credit (Clarification)
-// - Friday: full holiday — all worked hours are OT (minus break), +2 day credit
-// - Public holiday: same as Friday (+2 day credit by default; editable per holiday)
-// - Sahar (16:30 → 24:00 same day): 7:30 in separate Night Hours column; not in Approved
-// - Continuation morning (00:00 → next morning ≤ 08:00): attendance only, no OT
-// Times in this code are expressed in HOURS (e.g., 16.5 = 16:30).
+// Working hours: 08:00 → 16:30 (configurable). All times stored as decimal hours
+// (e.g. 16.5 = 16:30). Each row represents one (employee, day).
+//
+// Rule precedence (first match wins):
+//
+// 1. Sahar shift: 16:30 → 24:00 (To = 24:00 with From >= 16:30 OR full day reaching 24:00)
+//    → Night Hours = 7:30. Approved = 0.
+//
+// 2. Continuation morning: From = 0:00 (employee worked through midnight from prev day)
+//    - If To ≤ 16:30 (left at/before shift end):
+//        Approved = min(To - 0:30 break, 15:30 cap)
+//    - If To > 16:30 (stayed past shift end into OT):
+//        Approved = 15:30 base + (To - 16:30) - 0:30 break = To - 1:30
+//
+// 3. Regular OT (any day, including Friday/Saturday/Holiday):
+//    Approved = max(0, To - 16:30) if ≥ 1 hour, else 0
+//
+// Day credits (Clarification column) added on top:
+//   - Any work on Friday      → +2 days
+//   - Any work on Saturday    → +1 day
+//   - Any work on public hol. → +N days (per holiday config)
 // =============================================================================
 
 let state = {
   workbook: null,
-  rawRows: [],           // parsed rows from sheet (header preserved)
-  headerRows: [],        // rows 1..6
+  originalBytes: null,   // ArrayBuffer of uploaded file — used to re-export with original styles
+  rawRows: [],
+  headerRows: [],
   dataStartRow: 7,
-  employees: [],         // computed
+  employees: [],
   settings: {
     shiftStart: 8.0,
     shiftEnd: 16.5,
@@ -25,8 +39,9 @@ let state = {
     minOtHours: 1.0,
     fridayDays: 2,
     saturdayDays: 1,
+    continuationCap: 15.5,  // max Approved for the 0-to-16:30 portion of a continuation shift
   },
-  holidays: {},          // { 'YYYY-MM-DD': {name, days} }
+  holidays: {},
 };
 
 // ---------- helpers ----------
@@ -131,14 +146,6 @@ function calculateRow(parsed) {
   // parsed: { day, date, id, name, from, to, hours }
   // Returns: { approved, night, clarification, kind }
   const out = { approved: 0, night: 0, clarification: 0, kind: 'regular' };
-  if (parsed.from == null && parsed.to == null) return out;
-  if (parsed.from == null || parsed.to == null) return out;
-
-  const from = parsed.from;
-  const to = parsed.to;
-  const work = to - from;
-  if (work <= 0) return out;
-
   const s = state.settings;
   const dateStr = fmtDate(parsed.date);
   const day = parsed.day || dayName(parsed.date);
@@ -147,58 +154,58 @@ function calculateRow(parsed) {
   const holiday = state.holidays[dateStr];
   const breakHours = s.breakMinutes / 60;
 
-  // Friday: full holiday — every worked hour counts as OT (minus break)
-  if (isFriday) {
-    out.kind = 'friday';
-    out.clarification = s.fridayDays;
-    const ot = work - breakHours;
-    if (ot >= s.minOtHours) out.approved = ot;
-    return out;
-  }
+  if (parsed.from == null || parsed.to == null) return out;
+  const from = parsed.from;
+  const to = parsed.to;
+  const work = to - from;
+  if (work <= 0) return out;
 
-  // Public holiday (e.g., Sham El-Nessim): day credit only, OT past 16:30 like a regular weekday
-  if (holiday) {
-    out.kind = 'holiday';
-    out.clarification = holiday.days;
-    const ot = Math.max(0, to - s.shiftEnd);
-    if (ot >= s.minOtHours) out.approved = ot;
-    return out;
-  }
-
-  // Sahar shift: 16:30 → 24:00 exactly (any shift ending at 24:00 with start ≤ 16:30)
+  const isContinuation = from < 0.01;
   const endsAtMidnight = Math.abs(to - s.sahar.end) < 0.01;
-  if (endsAtMidnight && from >= s.sahar.start - 0.01) {
-    // Pure sahar shift
+
+  // 1. Sahar shift — full evening to midnight. Night Hours column gets 7:30, no Approved.
+  if (endsAtMidnight) {
     out.kind = 'sahar';
     out.night = s.sahar.total;
-    if (isSaturday) out.clarification = s.saturdayDays;
-    return out;
-  }
-  if (endsAtMidnight && from < s.sahar.start) {
-    // Full shift + sahar (e.g., 8:00 → 24:00). Regular shift portion not OT, sahar = 7:30.
-    out.kind = 'sahar';
-    out.night = s.sahar.total;
-    if (isSaturday) out.clarification = s.saturdayDays;
+    // Sahar doesn't carry Fri/Sat/holiday credits in the confirmed dataset
     return out;
   }
 
-  // Continuation morning: from = 0:00 and to ≤ 16:30 (worker came from previous night)
-  if (from < 0.01 && to <= s.shiftEnd + 0.01) {
+  // Determine if this counts as "worked that day" (eligible for Fri/Sat/holiday day credit).
+  // - Continuation morning (From=0 to ~16:30) implies a full overnight shift → eligible
+  // - Otherwise require at least the minimum-day-credit-hours (default 3:30)
+  const minDayCreditHours = 3.5;
+  const worksThisDay = isContinuation || work >= minDayCreditHours;
+
+  // Day credits — Fri/Sat always credit, public holiday credit only on a non-continuation work pattern
+  if (worksThisDay) {
+    if (isFriday) out.clarification = s.fridayDays;
+    else if (isSaturday) out.clarification = s.saturdayDays;
+    else if (holiday && !isContinuation) out.clarification = holiday.days;
+  }
+
+  // 2. Continuation morning — worked through midnight
+  if (isContinuation) {
     out.kind = 'continuation';
-    // Attendance only — no OT, no day credit (continuation of prior shift)
-    if (isSaturday) out.clarification = s.saturdayDays;
+    let approved;
+    if (to <= s.shiftStart + 0.001) {
+      // Worked only the "12am→8am don't count" portion. Per user's rule this is
+      // attendance only — no OT credit.
+      approved = 0;
+    } else if (to <= s.shiftEnd + 0.001) {
+      approved = Math.min(to - breakHours, s.continuationCap);
+    } else {
+      approved = s.continuationCap + (to - s.shiftEnd) - breakHours;
+    }
+    if (approved < s.minOtHours) approved = 0;
+    out.approved = approved;
     return out;
   }
 
-  if (isSaturday) {
-    out.kind = 'saturday';
-    out.clarification = s.saturdayDays;
-    const ot = Math.max(0, to - s.shiftEnd);
-    if (ot >= s.minOtHours) out.approved = ot;
-    return out;
-  }
-
-  // Regular weekday OT
+  // 3. Regular OT — past 16:30 only (applies to weekdays, Friday, Saturday and holidays)
+  if (isFriday) out.kind = 'friday';
+  else if (isSaturday) out.kind = 'saturday';
+  else if (holiday) out.kind = 'holiday';
   const ot = Math.max(0, to - s.shiftEnd);
   if (ot >= s.minOtHours) out.approved = ot;
   return out;
@@ -445,67 +452,120 @@ function renderPreview() {
 }
 
 // ---------- export ----------
-function exportXlsx() {
-  if (!state.workbook) return;
-  const wb = XLSX.utils.book_new();
-  const data = [];
-  // Header rows: rows 1..5 (empty/title) preserved, row 6 = column headers extended
-  for (let i = 0; i < 5; i++) {
-    data.push(state.headerRows[i].concat([null]));
-  }
-  data.push(['Day ', 'Date', 'ID', 'Name', 'From', 'To', 'Hours', 'Approved Days', 'Clarification', 'Night Hours']);
+// Edit the ORIGINAL workbook in-place using ExcelJS so that all images, fonts,
+// colors, merged cells, column widths and number formats are preserved exactly.
+async function exportXlsx() {
+  if (!state.originalBytes || !state.employees.length) return;
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(state.originalBytes);
+  const ws = wb.worksheets[0];
 
+  // Find header row by scanning for "Approved Days" — usually row 6.
+  let headerRowNum = 6;
+  for (let r = 1; r <= 20; r++) {
+    const v = ws.getCell(r, 8).value;
+    if (v && String(v).toLowerCase().includes('approved')) { headerRowNum = r; break; }
+  }
+  // Set header for new "Night Hours" column in column J (10)
+  const nightHeader = ws.getCell(headerRowNum, 10);
+  // Copy style from neighbouring header cell so the new header matches
+  const refHeader = ws.getCell(headerRowNum, 9);
+  nightHeader.value = 'Night Hours';
+  if (refHeader.style) nightHeader.style = JSON.parse(JSON.stringify(refHeader.style));
+
+  // Build an index of (id, dateISO) → calculation so we can match by content even if rows shift
+  const byKey = new Map();
   for (const e of state.employees) {
     for (const d of e.days) {
-      data.push([
-        d.day,
-        d.date,
-        d.id,
-        d.name,
-        hoursToExcelTime(d.from),
-        hoursToExcelTime(d.to),
-        hoursToExcelTime(d.hours),
-        d.calc.approved ? hoursToExcelTime(d.calc.approved) : null,
-        d.calc.clarification || null,
-        d.calc.night ? hoursToExcelTime(d.calc.night) : null,
-      ]);
+      const k = `${e.id}|${fmtDate(d.date)}`;
+      byKey.set(k, d.calc);
     }
-    let totalRaw = 0;
-    for (const d of e.days) totalRaw += d.hours || 0;
-    data.push([
-      'Total:', null, e.id, e.name, null, null,
-      hoursToExcelTime(totalRaw),
-      e.totals.approved ? hoursToExcelTime(e.totals.approved) : null,
-      e.totals.clarification || null,
-      e.totals.night ? hoursToExcelTime(e.totals.night) : null,
-    ]);
+    byKey.set(`total|${e.id}`, e.totals);
   }
 
-  const ws = XLSX.utils.aoa_to_sheet(data);
+  // Walk all rows starting just after the header row
+  let currentEmpId = null;
+  for (let r = headerRowNum + 1; r <= ws.rowCount; r++) {
+    const dayCell = ws.getCell(r, 1);
+    const idCell  = ws.getCell(r, 3);
+    const dateCell= ws.getCell(r, 2);
+    const dayVal  = dayCell.value;
 
-  // Column widths
-  ws['!cols'] = [
-    { wch: 11 }, { wch: 11 }, { wch: 7 }, { wch: 32 },
-    { wch: 9 }, { wch: 9 }, { wch: 9 },
-    { wch: 13 }, { wch: 12 }, { wch: 12 },
-  ];
-
-  // Format time cells. SheetJS community doesn't write all styles; we set z (number format) which is preserved.
-  const range = XLSX.utils.decode_range(ws['!ref']);
-  for (let R = 6; R <= range.e.r; R++) {
-    for (const C of [1]) { // date column
-      const addr = XLSX.utils.encode_cell({ r: R, c: C });
-      if (ws[addr] && ws[addr].v instanceof Date) { ws[addr].t = 'd'; ws[addr].z = 'dd/mm/yyyy'; }
+    // Total row
+    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
+      if (currentEmpId == null) continue;
+      const tot = byKey.get(`total|${currentEmpId}`);
+      if (tot) {
+        if (tot.approved) ws.getCell(r, 8).value = tot.approved / 24; else ws.getCell(r, 8).value = null;
+        if (tot.clarification) ws.getCell(r, 9).value = tot.clarification; else ws.getCell(r, 9).value = null;
+        if (tot.night) ws.getCell(r, 10).value = tot.night / 24; else ws.getCell(r, 10).value = null;
+        // Match number formats for time cells
+        ws.getCell(r, 8).numFmt = '[h]:mm';
+        ws.getCell(r, 10).numFmt = '[h]:mm';
+      }
+      currentEmpId = null;
+      continue;
     }
-    for (const C of [4, 5, 6, 7, 9]) { // time columns
-      const addr = XLSX.utils.encode_cell({ r: R, c: C });
-      if (ws[addr] && typeof ws[addr].v === 'number') { ws[addr].t = 'n'; ws[addr].z = '[h]:mm'; }
+
+    const id = idCell.value;
+    if (id == null) continue;
+    currentEmpId = id;
+
+    // Extract date for matching
+    let dateStr = null;
+    const dv = dateCell.value;
+    if (dv instanceof Date) {
+      // Shift into local-noon to avoid TZ rollover
+      const nd = new Date(dv.getTime() + 12 * 3600 * 1000);
+      dateStr = `${nd.getUTCFullYear()}-${pad(nd.getUTCMonth() + 1)}-${pad(nd.getUTCDate())}`;
+    } else if (typeof dv === 'string') {
+      const d2 = cellToDate({ w: dv });
+      if (d2) dateStr = fmtDate(d2);
+    } else if (typeof dv === 'number') {
+      const d2 = cellToDate(dv);
+      if (d2) dateStr = fmtDate(d2);
+    }
+    if (!dateStr) continue;
+    const calc = byKey.get(`${id}|${dateStr}`);
+    if (!calc) continue;
+
+    // Set Approved (H), Clarification (I), Night Hours (J)
+    const hCell = ws.getCell(r, 8);
+    const iCell = ws.getCell(r, 9);
+    const jCell = ws.getCell(r, 10);
+
+    if (calc.approved) {
+      hCell.value = calc.approved / 24;
+      hCell.numFmt = '[h]:mm';
+    } else {
+      hCell.value = null;
+    }
+    if (calc.clarification) iCell.value = calc.clarification; else iCell.value = null;
+    if (calc.night) {
+      jCell.value = calc.night / 24;
+      jCell.numFmt = '[h]:mm';
+      // Copy style from sibling I cell for consistency
+      if (iCell.style) jCell.style = Object.assign({}, jCell.style || {}, JSON.parse(JSON.stringify(iCell.style)));
+      jCell.numFmt = '[h]:mm';
+    } else {
+      jCell.value = null;
     }
   }
 
-  XLSX.utils.book_append_sheet(wb, ws, 'QC');
+  // Ensure column J has a reasonable width
+  const colJ = ws.getColumn(10);
+  if (!colJ.width || colJ.width < 11) colJ.width = 11;
+
+  const out = await wb.xlsx.writeBuffer();
   const filename = (state.fileName || 'overtime').replace(/\.xlsx$/i, '') + '-calculated.xlsx';
-  XLSX.writeFile(wb, filename);
+  const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
 }
 
 // ---------- wire up UI ----------
@@ -520,7 +580,9 @@ function handleFile(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
-      const data = new Uint8Array(e.target.result);
+      const ab = e.target.result;
+      state.originalBytes = ab;  // keep original bytes for in-place export
+      const data = new Uint8Array(ab.slice(0));
       const wb = XLSX.read(data, { type: 'array', cellDates: true });
       state.fileName = file.name;
       processWorkbook(wb);
