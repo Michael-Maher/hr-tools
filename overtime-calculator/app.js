@@ -163,25 +163,23 @@ function calculateRow(parsed) {
   const isContinuation = from < 0.01;
   const endsAtMidnight = Math.abs(to - s.sahar.end) < 0.01;
 
-  // 1. Sahar shift — full evening to midnight. Night Hours column gets 7:30, no Approved.
-  if (endsAtMidnight) {
-    out.kind = 'sahar';
-    out.night = s.sahar.total;
-    // Sahar doesn't carry Fri/Sat/holiday credits in the confirmed dataset
-    return out;
-  }
-
-  // Determine if this counts as "worked that day" (eligible for Fri/Sat/holiday day credit).
-  // - Continuation morning (From=0 to ~16:30) implies a full overnight shift → eligible
+  // Day credits — applied across all branches when there's substantial work on that day.
+  // - Continuation morning (From=0) → eligible
   // - Otherwise require at least the minimum-day-credit-hours (default 3:30)
   const minDayCreditHours = 3.5;
   const worksThisDay = isContinuation || work >= minDayCreditHours;
-
-  // Day credits — Fri/Sat always credit, public holiday credit only on a non-continuation work pattern
   if (worksThisDay) {
     if (isFriday) out.clarification = s.fridayDays;
     else if (isSaturday) out.clarification = s.saturdayDays;
     else if (holiday && !isContinuation) out.clarification = holiday.days;
+  }
+
+  // 1. Sahar shift — full evening to midnight. Night Hours = 7:30, no Approved.
+  //    Day credit (set above) is preserved if this falls on Fri/Sat/holiday.
+  if (endsAtMidnight) {
+    out.kind = 'sahar';
+    out.night = s.sahar.total;
+    return out;
   }
 
   // 2. Continuation morning — worked through midnight
@@ -189,13 +187,18 @@ function calculateRow(parsed) {
     out.kind = 'continuation';
     let approved;
     if (to <= s.shiftStart + 0.001) {
-      // Worked only the "12am→8am don't count" portion. Per user's rule this is
-      // attendance only — no OT credit.
+      // 0:00 → ≤ 8:00 = the "don't count" window — attendance only, no OT.
       approved = 0;
+    } else if (to <= s.shiftEnd - 0.5 + 0.001) {
+      // Left before the regular shift's lunch break — single 30 min break deducted.
+      approved = to - breakHours;
     } else if (to <= s.shiftEnd + 0.001) {
-      approved = Math.min(to - breakHours, s.continuationCap);
+      // Reached the regular shift end (lunch break consumed) — cap at 15:30.
+      approved = s.continuationCap;
     } else {
-      approved = s.continuationCap + (to - s.shiftEnd) - breakHours;
+      // Stayed past the regular shift end — deduct both lunch + extra break (1:00 total
+      // beyond the base 0:30) → effectively (To − 1:30), but never below the 15:30 cap.
+      approved = Math.max(s.continuationCap, to - 3 * breakHours);
     }
     if (approved < s.minOtHours) approved = 0;
     out.approved = approved;
@@ -295,58 +298,20 @@ function processWorkbook(wb) {
   state.employees = employees;
 }
 
-// ---------- holidays UI ----------
-function loadHolidays(list) {
+// ---------- holidays (shared with /holidays.html via localStorage) ----------
+const HOLIDAYS_STORAGE_KEY = 'hr-tools.holidays';
+
+function loadHolidaysFromStorage() {
   state.holidays = {};
+  let list = null;
+  try {
+    const raw = localStorage.getItem(HOLIDAYS_STORAGE_KEY);
+    if (raw) list = JSON.parse(raw);
+  } catch { /* fall through */ }
+  if (!list) list = (window.EGYPT_HOLIDAYS || []).map(h => ({ ...h, enabled: true }));
   for (const h of list) {
+    if (h.enabled === false) continue;
     state.holidays[h.date] = { name: h.name, days: h.days };
-  }
-}
-function renderHolidays() {
-  const wrap = document.getElementById('holidays-list');
-  wrap.innerHTML = '';
-  const sorted = Object.keys(state.holidays).sort();
-  const countEl = document.getElementById('holiday-count');
-  if (countEl) countEl.textContent = sorted.length.toLocaleString('ar-EG');
-  for (const date of sorted) {
-    const h = state.holidays[date];
-    const row = document.createElement('div');
-    row.className = 'holiday-row';
-    row.innerHTML = `
-      <input type="date" value="${date}" data-orig="${date}">
-      <input type="text" value="${h.name.replace(/"/g, '&quot;')}" placeholder="الاسم">
-      <select>
-        <option value="1" ${h.days === 1 ? 'selected' : ''}>١ يوم</option>
-        <option value="2" ${h.days === 2 ? 'selected' : ''}>٢ يوم</option>
-        <option value="3" ${h.days === 3 ? 'selected' : ''}>٣ أيام</option>
-      </select>
-      <button class="btn btn-danger btn-sm del">حذف</button>
-    `;
-    const [dateIn, nameIn, daysIn, delBtn] = row.querySelectorAll('input, select, button');
-    dateIn.addEventListener('change', () => {
-      const oldDate = dateIn.dataset.orig;
-      const newDate = dateIn.value;
-      if (!newDate) return;
-      if (newDate !== oldDate) {
-        delete state.holidays[oldDate];
-        state.holidays[newDate] = { name: nameIn.value, days: +daysIn.value };
-        dateIn.dataset.orig = newDate;
-        recalcAndRender();
-      }
-    });
-    nameIn.addEventListener('change', () => {
-      state.holidays[dateIn.value].name = nameIn.value;
-    });
-    daysIn.addEventListener('change', () => {
-      state.holidays[dateIn.value].days = +daysIn.value;
-      recalcAndRender();
-    });
-    delBtn.addEventListener('click', () => {
-      delete state.holidays[dateIn.dataset.orig];
-      renderHolidays();
-      recalcAndRender();
-    });
-    wrap.appendChild(row);
   }
 }
 
@@ -454,6 +419,18 @@ function renderPreview() {
 // ---------- export ----------
 // Edit the ORIGINAL workbook in-place using ExcelJS so that all images, fonts,
 // colors, merged cells, column widths and number formats are preserved exactly.
+
+// Set a cell's value and number format without leaking the format to sibling
+// cells that share the same underlying style object. ExcelJS stores `style` by
+// reference, so we must deep-copy it before mutating numFmt.
+function setCellWithFormat(cell, value, numFmt) {
+  if (cell.style) {
+    cell.style = JSON.parse(JSON.stringify(cell.style));
+  }
+  cell.value = value;
+  if (value != null) cell.numFmt = numFmt;
+}
+
 async function exportXlsx() {
   if (!state.originalBytes || !state.employees.length) return;
   const wb = new ExcelJS.Workbook();
@@ -496,12 +473,12 @@ async function exportXlsx() {
       if (currentEmpId == null) continue;
       const tot = byKey.get(`total|${currentEmpId}`);
       if (tot) {
-        if (tot.approved) ws.getCell(r, 8).value = tot.approved / 24; else ws.getCell(r, 8).value = null;
-        if (tot.clarification) ws.getCell(r, 9).value = tot.clarification; else ws.getCell(r, 9).value = null;
-        if (tot.night) ws.getCell(r, 10).value = tot.night / 24; else ws.getCell(r, 10).value = null;
-        // Match number formats for time cells
-        ws.getCell(r, 8).numFmt = '[h]:mm';
-        ws.getCell(r, 10).numFmt = '[h]:mm';
+        const hT = ws.getCell(r, 8);
+        const iT = ws.getCell(r, 9);
+        const jT = ws.getCell(r, 10);
+        setCellWithFormat(hT, tot.approved ? tot.approved / 24 : null, '[h]:mm');
+        setCellWithFormat(iT, tot.clarification || null, '0');
+        setCellWithFormat(jT, tot.night ? tot.night / 24 : null, '[h]:mm');
       }
       currentEmpId = null;
       continue;
@@ -534,19 +511,13 @@ async function exportXlsx() {
     const iCell = ws.getCell(r, 9);
     const jCell = ws.getCell(r, 10);
 
-    if (calc.approved) {
-      hCell.value = calc.approved / 24;
-      hCell.numFmt = '[h]:mm';
-    } else {
-      hCell.value = null;
-    }
-    if (calc.clarification) iCell.value = calc.clarification; else iCell.value = null;
+    setCellWithFormat(hCell, calc.approved ? calc.approved / 24 : null, '[h]:mm');
+    // Clarification holds a day count (1, 2, 3) — force integer format so the cell
+    // can't be misread as a time fraction (Excel renders "1" as "24:00" when a time
+    // number-format is inherited from a sibling cell's shared style).
+    setCellWithFormat(iCell, calc.clarification || null, '0');
     if (calc.night) {
-      jCell.value = calc.night / 24;
-      jCell.numFmt = '[h]:mm';
-      // Copy style from sibling I cell for consistency
-      if (iCell.style) jCell.style = Object.assign({}, jCell.style || {}, JSON.parse(JSON.stringify(iCell.style)));
-      jCell.numFmt = '[h]:mm';
+      setCellWithFormat(jCell, calc.night / 24, '[h]:mm');
     } else {
       jCell.value = null;
     }
@@ -599,8 +570,17 @@ function handleFile(file) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  loadHolidays(window.EGYPT_HOLIDAYS || []);
-  renderHolidays();
+  loadHolidaysFromStorage();
+  // Display the count of active holidays so users can see they're loaded
+  const countEl = document.getElementById('holiday-count');
+  if (countEl) countEl.textContent = Object.keys(state.holidays).length.toLocaleString('ar-EG');
+
+  // Refresh holidays when the user returns to this tab (they may have edited them on /holidays.html)
+  window.addEventListener('focus', () => {
+    loadHolidaysFromStorage();
+    if (countEl) countEl.textContent = Object.keys(state.holidays).length.toLocaleString('ar-EG');
+    recalcAndRender();
+  });
 
   const dz = document.getElementById('dropzone');
   const fi = document.getElementById('file-input');
@@ -620,6 +600,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // Settings inputs
   const wire = (id, key, parser = (v) => +v) => {
     const el = document.getElementById(id);
+    if (!el) return;
     el.addEventListener('change', () => {
       if (key === 'shiftStart' || key === 'shiftEnd') {
         const parts = el.value.split(':');
@@ -636,17 +617,4 @@ window.addEventListener('DOMContentLoaded', () => {
   wire('s-min-ot', 'minOtHours');
   wire('s-fri-days', 'fridayDays');
   wire('s-sat-days', 'saturdayDays');
-
-  // Add holiday
-  document.getElementById('btn-add-holiday').addEventListener('click', () => {
-    const d = document.getElementById('new-hol-date').value;
-    const n = document.getElementById('new-hol-name').value.trim();
-    const dy = +document.getElementById('new-hol-days').value;
-    if (!d || !n) { alert('املأ التاريخ والاسم'); return; }
-    state.holidays[d] = { name: n, days: dy };
-    document.getElementById('new-hol-date').value = '';
-    document.getElementById('new-hol-name').value = '';
-    renderHolidays();
-    recalcAndRender();
-  });
 });

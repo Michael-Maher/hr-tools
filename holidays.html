@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <meta name="theme-color" content="#4338ca">
+  <title>الأعياد الرسمية — HR Tools</title>
+  <link rel="stylesheet" href="overtime-calculator/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%234338ca'/%3E%3Ctext x='50' y='62' text-anchor='middle' font-size='44' fill='white'%3E%F0%9F%93%85%3C/text%3E%3C/svg%3E">
+  <style>
+    .holidays-page-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 10px;
+      margin: 16px 0;
+    }
+    .holiday-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: all .12s;
+    }
+    .holiday-card:hover { box-shadow: var(--shadow); border-color: var(--border-2); }
+    .holiday-card.disabled { opacity: .5; background: var(--bg-2); }
+    .holiday-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .holiday-card-date {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .holiday-card-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .holiday-card-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .holiday-card input[type="date"],
+    .holiday-card input[type="text"],
+    .holiday-card select {
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 12.5px;
+      background: #fff;
+    }
+    .holiday-card input[type="text"] { flex: 1; min-width: 0; }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: #cbd5e1;
+      transition: .15s;
+      border-radius: 99px;
+    }
+    .slider:before {
+      content: "";
+      position: absolute;
+      height: 14px;
+      width: 14px;
+      right: 3px;
+      bottom: 3px;
+      background-color: #fff;
+      transition: .15s;
+      border-radius: 50%;
+    }
+    .switch input:checked + .slider { background-color: var(--success); }
+    .switch input:checked + .slider:before { transform: translateX(-16px); }
+
+    .year-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0;
+    }
+    .year-tab {
+      padding: 8px 14px;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+      transition: all .12s;
+      margin-bottom: -1px;
+    }
+    .year-tab:hover { color: var(--text); }
+    .year-tab.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: rgba(255,255,255,.85);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 12px;
+      background: rgba(255,255,255,.12);
+      border-radius: 99px;
+      margin-bottom: 10px;
+      transition: background .12s;
+    }
+    .back-link:hover { background: rgba(255,255,255,.2); }
+
+    .save-bar {
+      position: sticky;
+      bottom: 0;
+      background: linear-gradient(180deg, transparent, var(--bg) 50%);
+      padding: 16px 0 0;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 16px;
+    }
+    .save-bar .status { flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="back-link" href="./">← الرجوع للأدوات</a>
+    <h1>📅 الأعياد الرسمية</h1>
+    <p>إدارة قائمة العطل الرسمية — هتستخدمها كل أدوات HR لما تحسب الـ overtime والإجازات</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>قائمة الأعياد</h2>
+
+      <div class="year-tabs" id="year-tabs"></div>
+
+      <div class="holidays-page-grid" id="holidays-grid"></div>
+
+      <h3 class="subhead" style="margin-top:24px">إضافة عيد جديد</h3>
+      <div class="add-holiday">
+        <input id="new-hol-date" type="date">
+        <input id="new-hol-name" type="text" placeholder="اسم العيد">
+        <select id="new-hol-days">
+          <option value="1">١ يوم credit</option>
+          <option value="2" selected>٢ يوم credit</option>
+          <option value="3">٣ أيام credit</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="btn-add-holiday">+ إضافة</button>
+      </div>
+
+      <div class="save-bar">
+        <span class="status ok" id="save-status">التغييرات بتتحفظ تلقائياً</span>
+        <button class="btn btn-secondary btn-sm" id="btn-reset">رجوع للقايمة الافتراضية</button>
+        <button class="btn btn-secondary btn-sm" id="btn-export-json">⬇ تصدير JSON</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>HR Tools · إدارة الأعياد</footer>
+
+  <script src="overtime-calculator/holidays.js"></script>
+  <script>
+    const STORAGE_KEY = 'hr-tools.holidays';
+
+    function load() {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        try { return JSON.parse(saved); } catch { /* fall through */ }
+      }
+      return (window.EGYPT_HOLIDAYS || []).map(h => ({ ...h, enabled: true }));
+    }
+    function save(list) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+      flash();
+    }
+    let saveTimer = null;
+    function flash() {
+      const el = document.getElementById('save-status');
+      el.textContent = '✓ اتحفظ';
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => { el.textContent = 'التغييرات بتتحفظ تلقائياً'; }, 1500);
+    }
+
+    let holidays = load();
+    let activeYear = null;
+
+    function years() {
+      const ys = new Set();
+      for (const h of holidays) {
+        const y = (h.date || '').slice(0, 4);
+        if (y) ys.add(y);
+      }
+      const arr = [...ys].sort();
+      return arr.length ? arr : [String(new Date().getFullYear())];
+    }
+
+    function renderTabs() {
+      const ys = years();
+      if (!activeYear || !ys.includes(activeYear)) activeYear = ys[0];
+      const wrap = document.getElementById('year-tabs');
+      wrap.innerHTML = '';
+      for (const y of ys) {
+        const b = document.createElement('button');
+        b.className = 'year-tab' + (y === activeYear ? ' active' : '');
+        b.textContent = y;
+        b.addEventListener('click', () => { activeYear = y; renderTabs(); renderGrid(); });
+        wrap.appendChild(b);
+      }
+    }
+
+    function renderGrid() {
+      const grid = document.getElementById('holidays-grid');
+      grid.innerHTML = '';
+      const filtered = holidays
+        .map((h, idx) => ({ ...h, idx }))
+        .filter(h => (h.date || '').startsWith(activeYear))
+        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      if (!filtered.length) {
+        grid.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:20px;text-align:center">مفيش أعياد في سنة ' + activeYear + '</p>';
+        return;
+      }
+      for (const h of filtered) {
+        const card = document.createElement('div');
+        card.className = 'holiday-card' + (h.enabled === false ? ' disabled' : '');
+        const d = new Date(h.date + 'T12:00:00');
+        const dayName = ['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'][d.getDay()];
+        card.innerHTML = `
+          <div class="holiday-card-head">
+            <div>
+              <div class="holiday-card-date">${dayName}</div>
+              <div class="holiday-card-name">${escapeHtml(h.name)}</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" data-idx="${h.idx}" data-action="toggle" ${h.enabled !== false ? 'checked' : ''}>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="holiday-card-row">
+            <input type="date" value="${h.date}" data-idx="${h.idx}" data-action="date">
+            <select data-idx="${h.idx}" data-action="days">
+              <option value="1" ${h.days === 1 ? 'selected' : ''}>١ يوم</option>
+              <option value="2" ${h.days === 2 ? 'selected' : ''}>٢ يوم</option>
+              <option value="3" ${h.days === 3 ? 'selected' : ''}>٣ أيام</option>
+            </select>
+          </div>
+          <div class="holiday-card-row">
+            <input type="text" value="${escapeHtml(h.name)}" data-idx="${h.idx}" data-action="name" placeholder="الاسم">
+            <button class="btn btn-danger btn-sm" data-idx="${h.idx}" data-action="delete">حذف</button>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    document.getElementById('holidays-grid').addEventListener('change', (e) => {
+      const t = e.target;
+      const idx = +t.dataset.idx;
+      if (isNaN(idx)) return;
+      const action = t.dataset.action;
+      if (action === 'date') holidays[idx].date = t.value;
+      else if (action === 'name') holidays[idx].name = t.value;
+      else if (action === 'days') holidays[idx].days = +t.value;
+      else if (action === 'toggle') holidays[idx].enabled = t.checked;
+      save(holidays);
+      // Re-render if date changed (year tab might shift)
+      if (action === 'date') { renderTabs(); renderGrid(); }
+    });
+    document.getElementById('holidays-grid').addEventListener('click', (e) => {
+      if (e.target.dataset?.action === 'delete') {
+        const idx = +e.target.dataset.idx;
+        holidays.splice(idx, 1);
+        save(holidays);
+        renderTabs();
+        renderGrid();
+      }
+    });
+
+    document.getElementById('btn-add-holiday').addEventListener('click', () => {
+      const date = document.getElementById('new-hol-date').value;
+      const name = document.getElementById('new-hol-name').value.trim();
+      const days = +document.getElementById('new-hol-days').value;
+      if (!date || !name) { alert('املأ التاريخ والاسم'); return; }
+      holidays.push({ date, name, days, enabled: true });
+      save(holidays);
+      const y = date.slice(0, 4);
+      if (years().includes(y)) activeYear = y;
+      document.getElementById('new-hol-date').value = '';
+      document.getElementById('new-hol-name').value = '';
+      renderTabs();
+      renderGrid();
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      if (!confirm('ترجع للقايمة الافتراضية؟ التعديلات الحالية هتتمسح.')) return;
+      localStorage.removeItem(STORAGE_KEY);
+      holidays = load();
+      renderTabs();
+      renderGrid();
+    });
+
+    document.getElementById('btn-export-json').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(holidays, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'holidays.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+    });
+
+    renderTabs();
+    renderGrid();
+  </script>
+</body>
+</html>

@@ -248,6 +248,18 @@ main {
   border-radius: 99px;
   font-weight: 600;
 }
+.holidays-link {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--primary);
+  text-decoration: none;
+  padding: 4px 10px;
+  background: var(--primary-soft);
+  border-radius: 6px;
+  font-weight: 600;
+  transition: background .12s;
+}
+.holidays-link:hover { background: #e0e7ff; }
 
 .holidays-list {
   display: grid;
