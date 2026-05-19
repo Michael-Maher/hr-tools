@@ -424,11 +424,12 @@ function renderPreview() {
 // cells that share the same underlying style object. ExcelJS stores `style` by
 // reference, so we must deep-copy it before mutating numFmt.
 function setCellWithFormat(cell, value, numFmt) {
-  if (cell.style) {
-    cell.style = JSON.parse(JSON.stringify(cell.style));
-  }
+  // Build the plain style object first, then assign — this avoids ExcelJS losing the
+  // numFmt override when cell.numFmt is set after a style-object assignment.
+  const style = cell.style ? JSON.parse(JSON.stringify(cell.style)) : {};
+  if (value != null) style.numFmt = numFmt;
   cell.value = value;
-  if (value != null) cell.numFmt = numFmt;
+  cell.style = style;
 }
 
 async function exportXlsx() {
