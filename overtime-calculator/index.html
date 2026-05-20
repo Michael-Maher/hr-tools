@@ -35,6 +35,10 @@
     <section class="card">
       <h2><span class="step">2</span>الإعدادات</h2>
       <div class="settings-grid">
+        <div class="setting setting-full">
+          <label>القسم (Department)</label>
+          <select id="s-dept"></select>
+        </div>
         <div class="setting">
           <label>بداية الشيفت</label>
           <input id="s-shift-start" type="time" value="08:00">
@@ -60,6 +64,8 @@
           <input id="s-sat-days" type="number" min="0" max="3" value="1">
         </div>
       </div>
+
+      <div id="dept-info" class="hidden"></div>
 
       <h3 class="subhead">
         الأعياد الرسمية

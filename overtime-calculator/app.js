@@ -41,9 +41,76 @@ let state = {
     fridayDays: 2,
     saturdayDays: 1,
     continuationCap: 15.5,  // max Approved for the 0-to-16:30 portion of a continuation shift
+    department: 'general',  // department key — drives worker/staff classification + per-dept rules
   },
   holidays: {},
 };
+
+// =============================================================================
+// Departments
+// =============================================================================
+// Each dept declares a default role (worker/staff) plus per-name exceptions.
+// Special rules:
+//   - saharAsOt:      sahar shift counts as OT (Approved) instead of Night Hours
+//   - driverBonus:    OT computed as max(0, total_hours − 15) — replaces normal OT
+//   - personOtStart:  { 'Name': 17.0 } — override the OT-start hour for that person
+//   - exemptNames:    these employees never receive OT or day credits
+//
+// Role consequences:
+//   - worker → holiday work earns the configured day credit (2 days)
+//   - staff  → holiday work earns NO day credit (they get an alternative day off)
+//   - exempt → row produces zeros (no OT, no credit, no sahar)
+// =============================================================================
+const DEPARTMENTS = [
+  { key: 'general',          label: 'بدون قسم — قواعد عامة فقط',          defaultRole: 'worker' },
+  { key: 'Transportation',   label: 'Transportation',   defaultRole: 'worker', driverBonus: true },
+  { key: 'Security',         label: 'Security',         defaultRole: 'worker', staffNames: ['Tamer'], saharAsOt: true },
+  { key: 'Finance',          label: 'Finance',          defaultRole: 'staff',  personOtStart: { 'Ahmed Ayman': 17.0 } },
+  { key: 'Warehouses',       label: 'Warehouses',       defaultRole: 'worker', exemptNames: ['Khaled Amer', 'Safwat', 'Ayman'] },
+  { key: 'Warehouses Sawah', label: 'Warehouses Sawah', defaultRole: 'worker', exemptNames: ['Khaled Amer', 'Safwat', 'Ayman'] },
+  { key: 'Cafeteria',        label: 'Cafeteria',        defaultRole: 'worker' },
+  { key: 'Buffet',           label: 'Buffet',           defaultRole: 'worker' },
+  { key: 'Housekeeping',     label: 'Housekeeping',     defaultRole: 'worker' },
+  { key: 'IT',               label: 'IT',               defaultRole: 'staff' },
+  { key: 'R&D',              label: 'R&D',              defaultRole: 'staff',  workerNames: ['Ahmed Abdel Karim'] },
+  { key: 'QC',               label: 'QC',               defaultRole: 'staff',  workerNames: ['Tamer Ahmed', 'Magdy Ghomry', 'Mahmoud Hamed', 'Al Moatasem'] },
+  { key: 'QA',               label: 'QA',               defaultRole: 'staff' },
+  { key: 'Supply Chain',     label: 'Supply Chain',     defaultRole: 'staff' },
+  { key: 'Engineering',      label: 'Engineering',      defaultRole: 'staff' },
+  { key: 'EHS',              label: 'EHS',              defaultRole: 'staff' },
+  { key: 'Production',       label: 'Production',       defaultRole: 'worker', staffNames: ['Youssef Ibrahim', 'Mahmoud Magdy', 'Abdelrahman Mohamed', 'Gouda'] },
+];
+const DEPT_BY_KEY = Object.fromEntries(DEPARTMENTS.map(d => [d.key, d]));
+
+function normName(s) {
+  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+// Loose substring match — handles "Tamer Ahmed" vs "Tamer", etc.
+function nameMatchesAny(actual, list) {
+  if (!list || !list.length) return false;
+  const a = normName(actual);
+  return list.some(n => {
+    const e = normName(n);
+    return e && (a.includes(e) || e.includes(a));
+  });
+}
+function getDeptConfig() {
+  return DEPT_BY_KEY[state.settings.department] || DEPT_BY_KEY.general;
+}
+function getEmployeeRole(empName, dept = getDeptConfig()) {
+  if (!dept) return 'worker';
+  if (nameMatchesAny(empName, dept.exemptNames)) return 'exempt';
+  if (nameMatchesAny(empName, dept.workerNames)) return 'worker';
+  if (nameMatchesAny(empName, dept.staffNames)) return 'staff';
+  return dept.defaultRole || 'worker';
+}
+function getPersonOtStart(empName, dept = getDeptConfig()) {
+  if (!dept?.personOtStart) return null;
+  for (const [key, val] of Object.entries(dept.personOtStart)) {
+    if (nameMatchesAny(empName, [key])) return val;
+  }
+  return null;
+}
 
 // ---------- helpers ----------
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -145,9 +212,16 @@ function dayName(d) {
 // ---------- core calculation ----------
 function calculateRow(parsed) {
   // parsed: { day, date, id, name, from, to, hours }
-  // Returns: { approved, night, clarification, kind }
-  const out = { approved: 0, night: 0, clarification: 0, kind: 'regular' };
+  // Returns: { approved, night, clarification, kind, role }
+  const out = { approved: 0, night: 0, clarification: 0, kind: 'regular', role: 'worker' };
   const s = state.settings;
+  const dept = getDeptConfig();
+  const role = getEmployeeRole(parsed.name, dept);
+  out.role = role;
+
+  // Exempt employees (e.g. Warehouses engineers) — never receive any OT/credit
+  if (role === 'exempt') { out.kind = 'exempt'; return out; }
+
   const dateStr = fmtDate(parsed.date);
   const day = parsed.day || dayName(parsed.date);
   const isFriday = day === 'Friday';
@@ -164,22 +238,42 @@ function calculateRow(parsed) {
   const isContinuation = from < 0.01;
   const endsAtMidnight = Math.abs(to - s.sahar.end) < 0.01;
 
-  // Day credits — applied across all branches when there's substantial work on that day.
-  // - Fri/Sat: require worked-hours × 1.5 ≥ 8 (i.e. OT after the 1.5× multiplier reaches
-  //   a full shift). Below that threshold, only the raw OT hours count, no day credit.
-  // - Holidays: require minimum-day-credit-hours (default 3:30), or continuation morning.
+  // Per-person OT start override (e.g. Ahmed Ayman in Finance → 17:00)
+  const otStart = getPersonOtStart(parsed.name, dept) ?? s.shiftEnd;
+
+  // ── Day credits ─────────────────────────────────────────────────────────
+  // - Fri/Sat: worked × 1.5 ≥ 8 (general rule)
+  // - Holidays: only workers receive the day credit; staff get an alt day off instead
   const minDayCreditHours = 3.5;
   const friSatGate = work * 1.5 >= 8;
   const holidayGate = isContinuation || work >= minDayCreditHours;
   if (isFriday && friSatGate) out.clarification = s.fridayDays;
   else if (isSaturday && friSatGate) out.clarification = s.saturdayDays;
-  else if (holiday && holidayGate && !isContinuation) out.clarification = holiday.days;
+  else if (holiday && holidayGate && !isContinuation && role === 'worker') {
+    out.clarification = holiday.days;
+  }
 
-  // 1. Sahar shift — full evening to midnight. Night Hours = 7:30, no Approved.
-  //    Day credit (set above) is preserved if this falls on Fri/Sat/holiday.
+  // ── Transportation: drivers receive max(0, total − 15) as OT, no sahar split ──
+  if (dept.driverBonus) {
+    if (isFriday) out.kind = 'friday';
+    else if (isSaturday) out.kind = 'saturday';
+    else if (holiday) out.kind = 'holiday';
+    else if (isContinuation) out.kind = 'continuation';
+    else out.kind = 'regular';
+    const driverOt = Math.max(0, work - 15);
+    if (driverOt >= s.minOtHours) out.approved = driverOt;
+    return out;
+  }
+
+  // 1. Sahar shift — full evening to midnight.
   if (endsAtMidnight) {
     out.kind = 'sahar';
-    out.night = s.sahar.total;
+    if (dept.saharAsOt) {
+      // Security: night-shift hours count as OT in Approved column
+      out.approved = s.sahar.total;
+    } else {
+      out.night = s.sahar.total;
+    }
     return out;
   }
 
@@ -188,17 +282,12 @@ function calculateRow(parsed) {
     out.kind = 'continuation';
     let approved;
     if (to <= s.shiftStart + 0.001) {
-      // 0:00 → ≤ 8:00 = the "don't count" window — attendance only, no OT.
       approved = 0;
     } else if (to <= s.shiftEnd - 0.5 + 0.001) {
-      // Left before the regular shift's lunch break — single 30 min break deducted.
       approved = to - breakHours;
     } else if (to <= s.shiftEnd + 0.001) {
-      // Reached the regular shift end (lunch break consumed) — cap at 15:30.
       approved = s.continuationCap;
     } else {
-      // Stayed past the regular shift end — deduct both lunch + extra break (1:00 total
-      // beyond the base 0:30) → effectively (To − 1:30), but never below the 15:30 cap.
       approved = Math.max(s.continuationCap, to - 3 * breakHours);
     }
     if (approved < s.minOtHours) approved = 0;
@@ -206,11 +295,11 @@ function calculateRow(parsed) {
     return out;
   }
 
-  // 3. Regular OT — past 16:30 only (applies to weekdays, Friday, Saturday and holidays)
+  // 3. Regular OT — past otStart (default 16:30, or 17:00 for some Finance staff)
   if (isFriday) out.kind = 'friday';
   else if (isSaturday) out.kind = 'saturday';
   else if (holiday) out.kind = 'holiday';
-  const ot = Math.max(0, to - s.shiftEnd);
+  const ot = Math.max(0, to - otStart);
   if (ot >= s.minOtHours) out.approved = ot;
   return out;
 }
@@ -401,11 +490,13 @@ function renderEmployeeDetail(filterId) {
   const t = e.totals;
   const recordCount = e.days.length;
   const avgOt = t.otDays ? t.approved / t.otDays : 0;
+  const role = getEmployeeRole(e.name);
+  const roleLabel = role === 'exempt' ? 'معفي' : (role === 'staff' ? 'Staff' : 'Worker');
   panel.innerHTML = `
     <div class="emp-card">
       <div class="emp-head">
         <div>
-          <div class="emp-name">${e.name}</div>
+          <div class="emp-name">${e.name} <span class="role-tag role-${role}">${roleLabel}</span></div>
           <div class="emp-id">ID: ${e.id}</div>
         </div>
         <div class="emp-meta">
@@ -445,6 +536,7 @@ function renderPreview() {
       else if (calc.kind === 'saturday') { tag = '<span class="tag tag-sat">سبت</span>'; rowClass = 'saturday'; }
       else if (calc.kind === 'sahar') { tag = '<span class="tag tag-sahar">سهر</span>'; rowClass = 'sahar'; }
       else if (calc.kind === 'continuation') { tag = '<span class="tag tag-sahar">امتداد</span>'; }
+      else if (calc.kind === 'exempt') { tag = '<span class="tag tag-exempt">معفي</span>'; rowClass = 'exempt'; }
       tr.className = rowClass;
       tr.innerHTML = `
         <td>${d.day || ''}</td>
@@ -686,4 +778,62 @@ window.addEventListener('DOMContentLoaded', () => {
   wire('s-min-ot', 'minOtHours');
   wire('s-fri-days', 'fridayDays');
   wire('s-sat-days', 'saturdayDays');
+
+  // Department selector — populate, restore saved choice, wire change handler
+  const deptSel = document.getElementById('s-dept');
+  if (deptSel) {
+    deptSel.innerHTML = '';
+    for (const d of DEPARTMENTS) {
+      const opt = document.createElement('option');
+      opt.value = d.key;
+      opt.textContent = d.label;
+      deptSel.appendChild(opt);
+    }
+    const saved = localStorage.getItem('hr-tools.department') || 'general';
+    deptSel.value = DEPT_BY_KEY[saved] ? saved : 'general';
+    state.settings.department = deptSel.value;
+    renderDeptInfo();
+    deptSel.addEventListener('change', () => {
+      state.settings.department = deptSel.value;
+      localStorage.setItem('hr-tools.department', deptSel.value);
+      renderDeptInfo();
+      recalcAndRender();
+    });
+  }
 });
+
+// ---------- department info panel ----------
+function renderDeptInfo() {
+  const panel = document.getElementById('dept-info');
+  if (!panel) return;
+  const dept = getDeptConfig();
+  if (!dept || dept.key === 'general') {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+    return;
+  }
+  const rules = [];
+  if (dept.defaultRole === 'staff') rules.push('الأصل: <b>Staff</b> — مفيش credit للأعياد (بدل راحة بدلها)');
+  else rules.push('الأصل: <b>Worker</b> — credit الأعياد بيتطبق');
+  if (dept.driverBonus) rules.push('🚚 Drivers OT = <code>max(0, إجمالي الساعات − 15)</code>');
+  if (dept.saharAsOt) rules.push('🌙 شيفت السهر بيتسجّل OT في <b>Approved</b> مش في Night');
+  if (dept.personOtStart) {
+    for (const [n, h] of Object.entries(dept.personOtStart)) {
+      const hh = Math.floor(h); const mm = Math.round((h - hh) * 60);
+      rules.push(`⏰ <b>${n}</b>: OT يبدأ من ${pad(hh)}:${pad(mm)}`);
+    }
+  }
+  const lists = [];
+  if (dept.workerNames?.length) lists.push(`<div class="dept-people"><span class="role-tag role-worker">Worker</span> ${dept.workerNames.map(n => `<span class="dept-name">${n}</span>`).join('')}</div>`);
+  if (dept.staffNames?.length)  lists.push(`<div class="dept-people"><span class="role-tag role-staff">Staff</span> ${dept.staffNames.map(n => `<span class="dept-name">${n}</span>`).join('')}</div>`);
+  if (dept.exemptNames?.length) lists.push(`<div class="dept-people"><span class="role-tag role-exempt">معفي</span> ${dept.exemptNames.map(n => `<span class="dept-name">${n}</span>`).join('')}</div>`);
+
+  panel.innerHTML = `
+    <div class="dept-info-box">
+      <div class="dept-info-title">📋 قواعد قسم ${dept.label}</div>
+      <ul class="dept-rules">${rules.map(r => `<li>${r}</li>`).join('')}</ul>
+      ${lists.join('')}
+    </div>
+  `;
+  panel.classList.remove('hidden');
+}

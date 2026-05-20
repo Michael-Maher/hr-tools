@@ -360,6 +360,78 @@ main {
 .summary-card.rose { background: linear-gradient(135deg, #ffe4e6, #fecdd3); border-color: #fda4af; }
 .summary-card.rose .num { color: #be123c; }
 
+/* ─────── department info panel ─────── */
+.setting-full { grid-column: 1 / -1; }
+.setting-full select {
+  font-weight: 700;
+  font-size: 15px;
+  padding: 11px 14px;
+  background: linear-gradient(180deg, #fff, #fafbff);
+}
+
+.dept-info-box {
+  background: linear-gradient(135deg, #fefce8, #fef9c3);
+  border: 1px solid #fde68a;
+  border-radius: var(--r);
+  padding: 14px 16px;
+  margin: 14px 0 18px;
+}
+.dept-info-title {
+  font-weight: 800;
+  font-size: 14px;
+  color: #854d0e;
+  margin-bottom: 8px;
+}
+.dept-rules {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.dept-rules li {
+  font-size: 12.5px;
+  color: var(--text-2);
+  background: #fff;
+  border-radius: 6px;
+  padding: 5px 9px;
+  border: 1px solid #fef3c7;
+}
+.dept-rules code {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11.5px;
+  background: #fef3c7;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.dept-people {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.dept-name {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 2px 9px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.role-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+.role-worker { background: #d1fae5; color: #047857; }
+.role-staff  { background: #dbeafe; color: #1d4ed8; }
+.role-exempt { background: #e5e7eb; color: #475569; }
+
 /* ─────── employee detail panel ─────── */
 .emp-card {
   background: linear-gradient(135deg, #fafbff, #f5f7ff);
@@ -518,6 +590,9 @@ table.preview tr.sahar:hover td { background: #f3e8ff !important; }
 .tag-sat { background: #dbeafe; color: #1e40af; }
 .tag-hol { background: #fecaca; color: #991b1b; }
 .tag-sahar { background: #e9d5ff; color: #6b21a8; }
+.tag-exempt { background: #e5e7eb; color: #475569; }
+table.preview tr.exempt td { background: #f8fafc; color: var(--muted); }
+table.preview tr.exempt:hover td { background: #f1f5f9 !important; }
 
 .hidden { display: none !important; }
 
