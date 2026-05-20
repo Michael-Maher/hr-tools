@@ -61,7 +61,6 @@ let state = {
 //   - exempt → row produces zeros (no OT, no credit, no sahar)
 // =============================================================================
 const DEPARTMENTS = [
-  { key: 'general',          label: 'بدون قسم — قواعد عامة فقط',          defaultRole: 'worker' },
   { key: 'Transportation',   label: 'Transportation',   defaultRole: 'worker', driverBonus: true },
   { key: 'Security',         label: 'Security',         defaultRole: 'worker', staffNames: ['Tamer'] },
   { key: 'Finance',          label: 'Finance',          defaultRole: 'staff',  personOtStart: { 'Ahmed Ayman': 17.0 } },
@@ -93,11 +92,14 @@ function nameMatchesAny(actual, list) {
     return e && (a.includes(e) || e.includes(a));
   });
 }
+// Returns the dept config for the current department, or null if none/invalid.
+// A null return means "not one of the 16 supported departments" → calculateRow
+// will produce no OT for the row.
 function getDeptConfig() {
-  return DEPT_BY_KEY[state.settings.department] || DEPT_BY_KEY.general;
+  return DEPT_BY_KEY[state.settings.department] || null;
 }
 function getEmployeeRole(empName, dept = getDeptConfig()) {
-  if (!dept) return 'worker';
+  if (!dept) return 'worker';  // no dept selected — role doesn't matter (no OT)
   if (nameMatchesAny(empName, dept.exemptNames)) return 'exempt';
   if (nameMatchesAny(empName, dept.workerNames)) return 'worker';
   if (nameMatchesAny(empName, dept.staffNames)) return 'staff';
@@ -215,6 +217,11 @@ function calculateRow(parsed) {
   const out = { approved: 0, clarification: 0, kind: 'regular', role: 'worker' };
   const s = state.settings;
   const dept = getDeptConfig();
+
+  // Department must be one of the 16 supported departments. For anything else,
+  // produce zero OT / zero credit (the calculator is only configured for these).
+  if (!dept) { out.kind = 'no-dept'; return out; }
+
   const role = getEmployeeRole(parsed.name, dept);
   out.role = role;
 
@@ -321,6 +328,7 @@ function calculateRow(parsed) {
 //                                           0-8 "don't count" window
 function linkContinuationChains(emp) {
   const s = state.settings;
+  if (!getDeptConfig()) return;  // no dept selected → calculateRow already zeroed everything
   for (let i = 1; i < emp.days.length; i++) {
     const cur = emp.days[i];
     const prev = emp.days[i - 1];
@@ -829,20 +837,21 @@ window.addEventListener('DOMContentLoaded', () => {
   // Department selector — populate, restore saved choice, wire change handler
   const deptSel = document.getElementById('s-dept');
   if (deptSel) {
-    deptSel.innerHTML = '';
+    deptSel.innerHTML = '<option value="">— اختر القسم —</option>';
     for (const d of DEPARTMENTS) {
       const opt = document.createElement('option');
       opt.value = d.key;
       opt.textContent = d.label;
       deptSel.appendChild(opt);
     }
-    const saved = localStorage.getItem('hr-tools.department') || 'general';
-    deptSel.value = DEPT_BY_KEY[saved] ? saved : 'general';
+    const saved = localStorage.getItem('hr-tools.department');
+    deptSel.value = DEPT_BY_KEY[saved] ? saved : '';
     state.settings.department = deptSel.value;
     renderDeptInfo();
     deptSel.addEventListener('change', () => {
       state.settings.department = deptSel.value;
-      localStorage.setItem('hr-tools.department', deptSel.value);
+      if (deptSel.value) localStorage.setItem('hr-tools.department', deptSel.value);
+      else localStorage.removeItem('hr-tools.department');
       renderDeptInfo();
       recalcAndRender();
     });
@@ -938,7 +947,7 @@ function setBatchMode(mode) {
 function addDeptSlot() {
   batch.depts.push({
     slotId: 'd' + (batch.nextSlotId++),
-    deptKey: 'general',
+    deptKey: '',
     file: null,
     bytes: null,
     fileName: '',
@@ -955,7 +964,7 @@ function renderBatchDepts() {
     const div = document.createElement('div');
     div.className = 'dept-slot' + (slot.processed ? ' processed' : '') + (slot.error ? ' error' : '');
     div.dataset.slotId = slot.slotId;
-    const deptOptions = DEPARTMENTS.map(d =>
+    const deptOptions = '<option value="">— اختر القسم —</option>' + DEPARTMENTS.map(d =>
       `<option value="${d.key}" ${d.key === slot.deptKey ? 'selected' : ''}>${d.label}</option>`
     ).join('');
     const fname = slot.fileName
@@ -1047,9 +1056,9 @@ function loadOverallFile(file) {
 }
 
 function updateBatchProcessButton() {
-  const hasDept = batch.depts.some(s => s.bytes);
+  const hasReadyDept = batch.depts.some(s => s.bytes && s.deptKey);
   const hasOverall = batch.overall && batch.overall.bytes;
-  document.getElementById('btn-batch-process').disabled = !(hasDept && hasOverall);
+  document.getElementById('btn-batch-process').disabled = !(hasReadyDept && hasOverall);
 }
 
 async function batchProcessAll() {
@@ -1062,6 +1071,7 @@ async function batchProcessAll() {
     const savedDept = state.settings.department;
     for (const slot of batch.depts) {
       if (!slot.bytes) continue;
+      if (!slot.deptKey) { slot.error = 'لم يتم اختيار القسم'; slot.processed = false; continue; }
       try {
         state.settings.department = slot.deptKey;
         const data = new Uint8Array(slot.bytes.slice(0));
@@ -1141,9 +1151,16 @@ function processWorkbookFor(wb) {
   return employees;
 }
 
-// Read overall factory sheet, locate each row by ID, write totals into the
-// "Submitted extra working days" (G) and "Submitted extra working hours" (I) columns.
-// Returns { bytes, filled, unmatched }.
+// Read overall factory sheet, match each row by employee ID (col A), and write
+// computed totals into the fixed columns the template defines:
+//   col G (7) = "Submitted extra working days"  ← e.totals.clarification
+//   col I (9) = "Submitted extra working hours" ← e.totals.approved
+// Everything else — file name, sheet names, headers, formatting, formulas,
+// untouched cells — stays exactly as uploaded.
+const OVERALL_ID_COL = 1;     // A
+const OVERALL_DAYS_COL = 7;   // G
+const OVERALL_HOURS_COL = 9;  // I
+
 async function fillOverallSheet() {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(batch.overall.bytes);
@@ -1161,28 +1178,21 @@ async function fillOverallSheet() {
   let filled = 0;
   const matchedIds = new Set();
   for (const ws of wb.worksheets) {
-    // Look for ID and submission columns in the header row
-    let idCol = 0, daysCol = 0, hoursCol = 0;
-    for (let c = 1; c <= ws.columnCount; c++) {
-      const hv = String(ws.getCell(1, c).value || '').toLowerCase();
-      if (hv === 'id' && !idCol) idCol = c;
-      if (hv.includes('submitted') && hv.includes('working days') && !daysCol) daysCol = c;
-      if (hv.includes('submitted') && hv.includes('working hours') && !hoursCol) hoursCol = c;
-    }
-    if (!idCol) continue;  // not a roster sheet
+    // Walk rows starting at row 2 (skip header). Stop scanning the sheet when
+    // there are no more IDs.
     for (let r = 2; r <= ws.rowCount; r++) {
-      const idVal = ws.getCell(r, idCol).value;
+      const idVal = ws.getCell(r, OVERALL_ID_COL).value;
       if (idVal == null) continue;
       const key = String(idVal).trim();
       const m = byId.get(key);
       if (!m) continue;
       matchedIds.add(key);
       const refFont = rowRefFont(ws, r);
-      if (daysCol && m.days) {
-        setCellWithFormat(ws.getCell(r, daysCol), m.days, '0', refFont);
+      if (m.days) {
+        setCellWithFormat(ws.getCell(r, OVERALL_DAYS_COL), m.days, '0', refFont);
       }
-      if (hoursCol && m.hours) {
-        setCellWithFormat(ws.getCell(r, hoursCol), m.hours / 24, '[h]:mm', refFont);
+      if (m.hours) {
+        setCellWithFormat(ws.getCell(r, OVERALL_HOURS_COL), m.hours / 24, '[h]:mm', refFont);
       }
       filled++;
     }
@@ -1215,7 +1225,8 @@ function batchDownloadDept(slot) {
 
 function batchDownloadOverall() {
   if (!batch.overallOutBytes) return;
-  const filename = (batch.overall.fileName || 'overall').replace(/\.xlsx$/i, '') + '-calculated.xlsx';
+  // Keep the original filename exactly — only the G/I cells changed.
+  const filename = batch.overall.fileName || 'overall.xlsx';
   const blob = new Blob([batch.overallOutBytes], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
