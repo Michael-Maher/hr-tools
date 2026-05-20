@@ -19,9 +19,10 @@
 //    Approved = max(0, To - 16:30) if ≥ 1 hour, else 0
 //
 // Day credits (Clarification column) added on top:
-//   - Any work on Friday      → +2 days
-//   - Any work on Saturday    → +1 day
-//   - Any work on public hol. → +N days (per holiday config)
+//   - Friday   → +2 days only if (worked × 1.5) ≥ 8 (i.e. worked ≥ ~5:20)
+//   - Saturday → +1 day  only if (worked × 1.5) ≥ 8
+//     Below that threshold, only raw OT hours count (no day credit).
+//   - Public holiday → +N days (per holiday config) when worked ≥ 3:30
 // =============================================================================
 
 let state = {
@@ -164,15 +165,15 @@ function calculateRow(parsed) {
   const endsAtMidnight = Math.abs(to - s.sahar.end) < 0.01;
 
   // Day credits — applied across all branches when there's substantial work on that day.
-  // - Continuation morning (From=0) → eligible
-  // - Otherwise require at least the minimum-day-credit-hours (default 3:30)
+  // - Fri/Sat: require worked-hours × 1.5 ≥ 8 (i.e. OT after the 1.5× multiplier reaches
+  //   a full shift). Below that threshold, only the raw OT hours count, no day credit.
+  // - Holidays: require minimum-day-credit-hours (default 3:30), or continuation morning.
   const minDayCreditHours = 3.5;
-  const worksThisDay = isContinuation || work >= minDayCreditHours;
-  if (worksThisDay) {
-    if (isFriday) out.clarification = s.fridayDays;
-    else if (isSaturday) out.clarification = s.saturdayDays;
-    else if (holiday && !isContinuation) out.clarification = holiday.days;
-  }
+  const friSatGate = work * 1.5 >= 8;
+  const holidayGate = isContinuation || work >= minDayCreditHours;
+  if (isFriday && friSatGate) out.clarification = s.fridayDays;
+  else if (isSaturday && friSatGate) out.clarification = s.saturdayDays;
+  else if (holiday && holidayGate && !isContinuation) out.clarification = holiday.days;
 
   // 1. Sahar shift — full evening to midnight. Night Hours = 7:30, no Approved.
   //    Day credit (set above) is preserved if this falls on Fri/Sat/holiday.
