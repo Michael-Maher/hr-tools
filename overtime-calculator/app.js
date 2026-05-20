@@ -72,7 +72,7 @@ const DEPARTMENTS = [
   { key: 'Buffet',           label: 'Buffet',           defaultRole: 'worker' },
   { key: 'Housekeeping',     label: 'Housekeeping',     defaultRole: 'worker' },
   { key: 'IT',               label: 'IT',               defaultRole: 'staff' },
-  { key: 'R&D',              label: 'R&D',              defaultRole: 'staff',  workerNames: ['Ahmed Abdel Karim'] },
+  { key: 'R&D',              label: 'R&D',              defaultRole: 'staff',  workerNames: ['Ahmed Abdel Karim', 'Ahmed Abdelkareem'] },
   { key: 'QC',               label: 'QC',               defaultRole: 'staff',  workerNames: ['Tamer Ahmed', 'Magdy Ghomry', 'Mahmoud Hamed', 'Al Moatasem'] },
   { key: 'QA',               label: 'QA',               defaultRole: 'staff' },
   { key: 'Supply Chain',     label: 'Supply Chain',     defaultRole: 'staff' },
@@ -242,16 +242,18 @@ function calculateRow(parsed) {
   const otStart = getPersonOtStart(parsed.name, dept) ?? s.shiftEnd;
 
   // ── Day credits ─────────────────────────────────────────────────────────
-  // - Fri/Sat: worked × 1.5 ≥ 8 (general rule)
-  // - Holidays: only workers receive the day credit; staff get an alt day off instead
+  // Fri/Sat need worked × 1.5 ≥ 8. Holidays only credit workers (staff get alt day off).
+  // When a holiday falls on Fri/Sat, take the MAX credit (holiday's 2 vs Sat's 1).
   const minDayCreditHours = 3.5;
   const friSatGate = work * 1.5 >= 8;
   const holidayGate = isContinuation || work >= minDayCreditHours;
-  if (isFriday && friSatGate) out.clarification = s.fridayDays;
-  else if (isSaturday && friSatGate) out.clarification = s.saturdayDays;
-  else if (holiday && holidayGate && !isContinuation && role === 'worker') {
-    out.clarification = holiday.days;
+  let credit = 0;
+  if (isFriday && friSatGate) credit = Math.max(credit, s.fridayDays);
+  if (isSaturday && friSatGate) credit = Math.max(credit, s.saturdayDays);
+  if (holiday && holidayGate && !isContinuation && role === 'worker') {
+    credit = Math.max(credit, holiday.days);
   }
+  out.clarification = credit;
 
   // ── Transportation: drivers receive max(0, total − 15) as OT, no sahar split ──
   if (dept.driverBonus) {
@@ -265,33 +267,42 @@ function calculateRow(parsed) {
     return out;
   }
 
-  // 1. Sahar shift — full evening to midnight.
-  if (endsAtMidnight) {
-    out.kind = 'sahar';
-    if (dept.saharAsOt) {
-      // Security: night-shift hours count as OT in Approved column
-      out.approved = s.sahar.total;
-    } else {
-      out.night = s.sahar.total;
-    }
-    return out;
-  }
-
-  // 2. Continuation morning — worked through midnight
+  // 1. Continuation morning checked first — a 0→24 row is a full overnight session,
+  //    not just an evening sahar shift. The chain pass (linkContinuationChains) may
+  //    later rewrite this when the previous row was a sahar.
   if (isContinuation) {
     out.kind = 'continuation';
+    const fullCount = isFriday || isSaturday || !!holiday;
     let approved;
     if (to <= s.shiftStart + 0.001) {
-      approved = 0;
-    } else if (to <= s.shiftEnd - 0.5 + 0.001) {
-      approved = to - breakHours;
+      approved = 0;  // Fresh-midnight start, leaves by 8 AM — attendance only
+    } else if (fullCount) {
+      // Fri/Sat/Holiday cont: count all hours (only break deducted), capped at 15:30
+      approved = Math.min(to - breakHours, s.continuationCap);
     } else if (to <= s.shiftEnd + 0.001) {
-      approved = s.continuationCap;
+      // Weekday fresh-midnight start, leaving by 16:30 — exclude the 0-8 portion
+      approved = Math.max(0, to - s.shiftStart - breakHours);
     } else {
-      approved = Math.max(s.continuationCap, to - 3 * breakHours);
+      // Weekday cont staying past shift end — excl 0-8, capped
+      approved = Math.min(s.continuationCap, to - s.shiftStart - breakHours);
     }
     if (approved < s.minOtHours) approved = 0;
     out.approved = approved;
+    return out;
+  }
+
+  // 2. Sahar shift — full evening to midnight.
+  if (endsAtMidnight) {
+    out.kind = 'sahar';
+    if (dept.saharAsOt) {
+      // Security: night-shift hours count as 7:30 OT in Approved
+      out.approved = s.sahar.total;
+    } else if (role === 'staff') {
+      // Staff sahar — OT (if any) gets recorded on the next-day continuation row
+      // by linkContinuationChains. Leave both approved and night at 0 here.
+    } else {
+      out.night = s.sahar.total;
+    }
     return out;
   }
 
@@ -302,6 +313,41 @@ function calculateRow(parsed) {
   const ot = Math.max(0, to - otStart);
   if (ot >= s.minOtHours) out.approved = ot;
   return out;
+}
+
+// When a continuation morning (From=0) follows a sahar evening on the previous day,
+// re-distribute the OT between the two rows. Two patterns observed in confirmed HR
+// files:
+//   "lump"  (to ≤ 16:30 or exactly 24:00): morning absorbs the night → sahar=0,
+//           morning = min(to − break, 15:30 cap)
+//   "split" (16:30 < to < 24:00):           sahar keeps 7:30, morning excludes the
+//                                           0-8 "don't count" window
+// Skipped for saharAsOt depts (Security): their sahar is fixed at 7:30 OT.
+function linkContinuationChains(emp) {
+  const dept = getDeptConfig();
+  if (dept.saharAsOt) return;
+  const s = state.settings;
+  for (let i = 1; i < emp.days.length; i++) {
+    const cur = emp.days[i];
+    const prev = emp.days[i - 1];
+    if (!cur.calc || !prev.calc) continue;
+    if (cur.calc.kind !== 'continuation' || prev.calc.kind !== 'sahar') continue;
+    const t = cur.to;
+    if (t == null) continue;
+    if (t <= s.shiftEnd + 0.001 || Math.abs(t - s.sahar.end) < 0.01) {
+      // lump
+      prev.calc.approved = 0;
+      prev.calc.night = 0;
+      let mor = Math.min(t - s.breakMinutes / 60, s.continuationCap);
+      if (mor < s.minOtHours) mor = 0;
+      cur.calc.approved = mor;
+    } else {
+      // split
+      prev.calc.approved = s.sahar.total;
+      prev.calc.night = 0;
+      // morning keeps its excl-0-8 value from calculateRow()
+    }
+  }
 }
 
 // ---------- file parsing ----------
@@ -398,9 +444,10 @@ function processWorkbook(wb) {
   }
   if (cur) employees.push(cur);
 
-  // Compute calculations
+  // Compute calculations (two passes: per-row, then chain linking for sahar→cont)
   for (const e of employees) {
     for (const d of e.days) d.calc = calculateRow(d);
+    linkContinuationChains(e);
     e.totals = computeEmployeeTotals(e);
   }
 
@@ -428,6 +475,7 @@ function recalcAndRender() {
   if (!state.employees.length) return;
   for (const e of state.employees) {
     for (const d of e.days) d.calc = calculateRow(d);
+    linkContinuationChains(e);
     e.totals = computeEmployeeTotals(e);
   }
   renderPreview();
@@ -588,11 +636,15 @@ function setCellWithFormat(cell, value, numFmt, refFont) {
   // numFmt override when cell.numFmt is set after a style-object assignment.
   const style = cell.style ? JSON.parse(JSON.stringify(cell.style)) : {};
   if (value != null) style.numFmt = numFmt;
-  // Inherit the row's font (e.g. red text) when the target cell has none of its own.
-  // The H/I/J cells in the raw monthly file are usually empty → no font → values
-  // would otherwise render in black and break the row's color coding.
-  if (refFont && !style.font) {
-    style.font = JSON.parse(JSON.stringify(refFont));
+  // Inherit the row's font color (e.g. red text) so values we write match the rest
+  // of the row. The H/I/J cells in the raw file are often empty (no font at all) or
+  // carry a default font without a color — both cases would render black otherwise.
+  if (refFont) {
+    if (!style.font) {
+      style.font = JSON.parse(JSON.stringify(refFont));
+    } else if (refFont.color && !style.font.color) {
+      style.font = { ...style.font, color: JSON.parse(JSON.stringify(refFont.color)) };
+    }
   }
   cell.value = value;
   cell.style = style;
