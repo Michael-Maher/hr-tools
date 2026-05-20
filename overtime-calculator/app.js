@@ -235,6 +235,32 @@ function parseSheet(ws) {
   return rows;
 }
 
+// Compute totals + per-category breakdown for one employee. Centralised so
+// processWorkbook and recalcAndRender stay in sync.
+function computeEmployeeTotals(e) {
+  let approved = 0, night = 0, clarification = 0;
+  let friDays = 0, satDays = 0, holDays = 0;
+  let daysWorked = 0, otDays = 0, saharDays = 0;
+  for (const d of e.days) {
+    const c = d.calc;
+    if (!c) continue;
+    approved += c.approved;
+    night += c.night;
+    clarification += c.clarification;
+    const worked = d.from != null && d.to != null && (d.to - d.from) > 0;
+    if (worked) daysWorked++;
+    if (c.kind === 'sahar') saharDays++;
+    if (c.approved > 0) otDays++;
+    if (c.clarification > 0) {
+      const dn = d.day || dayName(d.date);
+      if (dn === 'Friday') friDays += c.clarification;
+      else if (dn === 'Saturday') satDays += c.clarification;
+      else holDays += c.clarification;
+    }
+  }
+  return { approved, night, clarification, friDays, satDays, holDays, daysWorked, otDays, saharDays };
+}
+
 function processWorkbook(wb) {
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
@@ -285,15 +311,8 @@ function processWorkbook(wb) {
 
   // Compute calculations
   for (const e of employees) {
-    let totApproved = 0, totNight = 0, totClarif = 0;
-    for (const d of e.days) {
-      const calc = calculateRow(d);
-      d.calc = calc;
-      totApproved += calc.approved;
-      totNight += calc.night;
-      totClarif += calc.clarification;
-    }
-    e.totals = { approved: totApproved, night: totNight, clarification: totClarif };
+    for (const d of e.days) d.calc = calculateRow(d);
+    e.totals = computeEmployeeTotals(e);
   }
 
   state.employees = employees;
@@ -319,14 +338,8 @@ function loadHolidaysFromStorage() {
 function recalcAndRender() {
   if (!state.employees.length) return;
   for (const e of state.employees) {
-    let totApproved = 0, totNight = 0, totClarif = 0;
-    for (const d of e.days) {
-      d.calc = calculateRow(d);
-      totApproved += d.calc.approved;
-      totNight += d.calc.night;
-      totClarif += d.calc.clarification;
-    }
-    e.totals = { approved: totApproved, night: totNight, clarification: totClarif };
+    for (const d of e.days) d.calc = calculateRow(d);
+    e.totals = computeEmployeeTotals(e);
   }
   renderPreview();
 }
@@ -344,20 +357,74 @@ function renderEmployeeFilter() {
 }
 
 function renderSummary() {
-  const totalEmp = state.employees.length;
-  let totalApproved = 0, totalNight = 0, totalClarif = 0;
-  for (const e of state.employees) {
-    totalApproved += e.totals.approved;
-    totalNight += e.totals.night;
-    totalClarif += e.totals.clarification;
+  const filterId = document.getElementById('emp-filter').value;
+  const list = filterId
+    ? state.employees.filter(e => String(e.id) === String(filterId))
+    : state.employees;
+  const totalEmp = list.length;
+  let totApproved = 0, totNight = 0, totClarif = 0;
+  let totFri = 0, totSat = 0, totHol = 0;
+  let totDaysWorked = 0, totOtDays = 0, totSaharDays = 0;
+  for (const e of list) {
+    totApproved += e.totals.approved;
+    totNight += e.totals.night;
+    totClarif += e.totals.clarification;
+    totFri += e.totals.friDays;
+    totSat += e.totals.satDays;
+    totHol += e.totals.holDays;
+    totDaysWorked += e.totals.daysWorked;
+    totOtDays += e.totals.otDays;
+    totSaharDays += e.totals.saharDays;
   }
   const grid = document.getElementById('summary-grid');
+  const empLabel = filterId ? 'الموظف المعروض' : 'عدد الموظفين';
   grid.innerHTML = `
-    <div class="summary-card"><div class="num">${totalEmp}</div><div class="lbl">عدد الموظفين</div></div>
-    <div class="summary-card green"><div class="num">${hoursToHHMM(totalApproved) || '0:00'}</div><div class="lbl">إجمالي ساعات الأوفر تايم</div></div>
-    <div class="summary-card purple"><div class="num">${hoursToHHMM(totalNight) || '0:00'}</div><div class="lbl">إجمالي ساعات السهر</div></div>
-    <div class="summary-card cyan"><div class="num">${totalClarif}</div><div class="lbl">إجمالي أيام (جمعات/سبتات/أعياد)</div></div>
+    <div class="summary-card"><div class="num">${totalEmp}</div><div class="lbl">${empLabel}</div></div>
+    <div class="summary-card amber"><div class="num">${totDaysWorked}</div><div class="lbl">أيام العمل الفعلية</div></div>
+    <div class="summary-card green"><div class="num">${hoursToHHMM(totApproved) || '0:00'}</div><div class="lbl">إجمالي الأوفر تايم</div></div>
+    <div class="summary-card purple"><div class="num">${hoursToHHMM(totNight) || '0:00'}</div><div class="lbl">إجمالي ساعات السهر</div></div>
+    <div class="summary-card cyan"><div class="num">${totClarif}</div><div class="lbl">إجمالي أيام Clarification</div></div>
+    <div class="summary-card emerald"><div class="num">${totFri}</div><div class="lbl">أيام الجمعات</div></div>
+    <div class="summary-card sky"><div class="num">${totSat}</div><div class="lbl">أيام السبت</div></div>
+    <div class="summary-card rose"><div class="num">${totHol}</div><div class="lbl">أيام الأعياد</div></div>
   `;
+  // Per-employee detail panel — only when one employee is selected
+  renderEmployeeDetail(filterId);
+}
+
+function renderEmployeeDetail(filterId) {
+  const panel = document.getElementById('emp-detail');
+  if (!panel) return;
+  if (!filterId) { panel.innerHTML = ''; panel.classList.add('hidden'); return; }
+  const e = state.employees.find(emp => String(emp.id) === String(filterId));
+  if (!e) { panel.innerHTML = ''; panel.classList.add('hidden'); return; }
+  const t = e.totals;
+  const recordCount = e.days.length;
+  const avgOt = t.otDays ? t.approved / t.otDays : 0;
+  panel.innerHTML = `
+    <div class="emp-card">
+      <div class="emp-head">
+        <div>
+          <div class="emp-name">${e.name}</div>
+          <div class="emp-id">ID: ${e.id}</div>
+        </div>
+        <div class="emp-meta">
+          <span>${recordCount} سجل</span>
+          <span>·</span>
+          <span>${t.daysWorked} يوم عمل</span>
+          ${t.otDays ? `<span>·</span><span>متوسط أوفر تايم/يوم: ${hoursToHHMM(avgOt)}</span>` : ''}
+        </div>
+      </div>
+      <div class="emp-stats">
+        <div class="estat"><div class="estat-num">${hoursToHHMM(t.approved) || '0:00'}</div><div class="estat-lbl">إجمالي الأوفر تايم</div></div>
+        <div class="estat purple"><div class="estat-num">${hoursToHHMM(t.night) || '0:00'}</div><div class="estat-lbl">السهر (${t.saharDays} ليلة)</div></div>
+        <div class="estat emerald"><div class="estat-num">${t.friDays}</div><div class="estat-lbl">أيام جمعة</div></div>
+        <div class="estat sky"><div class="estat-num">${t.satDays}</div><div class="estat-lbl">أيام سبت</div></div>
+        <div class="estat rose"><div class="estat-num">${t.holDays}</div><div class="estat-lbl">أيام أعياد</div></div>
+      </div>
+    </div>
+  `;
+  panel.classList.remove('hidden');
 }
 
 function renderPreview() {

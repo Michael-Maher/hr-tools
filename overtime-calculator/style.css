@@ -351,6 +351,77 @@ main {
 .summary-card.purple .num { color: #7c3aed; }
 .summary-card.cyan { background: linear-gradient(135deg, #cffafe, #a5f3fc); border-color: #67e8f9; }
 .summary-card.cyan .num { color: #0891b2; }
+.summary-card.amber { background: linear-gradient(135deg, #fef3c7, #fde68a); border-color: #fcd34d; }
+.summary-card.amber .num { color: #b45309; }
+.summary-card.emerald { background: linear-gradient(135deg, #d1fae5, #a7f3d0); border-color: #6ee7b7; }
+.summary-card.emerald .num { color: #047857; }
+.summary-card.sky { background: linear-gradient(135deg, #dbeafe, #bfdbfe); border-color: #93c5fd; }
+.summary-card.sky .num { color: #1d4ed8; }
+.summary-card.rose { background: linear-gradient(135deg, #ffe4e6, #fecdd3); border-color: #fda4af; }
+.summary-card.rose .num { color: #be123c; }
+
+/* ─────── employee detail panel ─────── */
+.emp-card {
+  background: linear-gradient(135deg, #fafbff, #f5f7ff);
+  border: 1px solid #e0e7ff;
+  border-radius: var(--r);
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-sm);
+}
+.emp-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #c7d2fe;
+}
+.emp-name {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--primary-hover);
+  letter-spacing: -0.01em;
+}
+.emp-id { font-size: 12px; color: var(--muted); margin-top: 2px; font-weight: 500; }
+.emp-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.emp-meta span { white-space: nowrap; }
+.emp-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+.estat {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.estat-num {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--success);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.estat-lbl { font-size: 11px; color: var(--muted); margin-top: 2px; font-weight: 600; }
+.estat.purple .estat-num { color: #7c3aed; }
+.estat.emerald .estat-num { color: #047857; }
+.estat.sky .estat-num { color: #1d4ed8; }
+.estat.rose .estat-num { color: #be123c; }
 .summary-card .num {
   font-size: 26px;
   font-weight: 800;
