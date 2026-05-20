@@ -15,10 +15,22 @@
 <body>
   <header>
     <h1><span class="icon"></span>حاسبة الأوفر تايم</h1>
-    <p>ارفع فايل الـ attendance الشهري وهيحسب Approved Days و Clarification وساعات السهر تلقائيًا بقواعد QC</p>
+    <p>ارفع فايل قسم واحد، أو ارفع كل أقسام المصنع دفعة واحدة مع الشيت الإجمالي — وهيحسب Approved Days و Clarification أوتوماتيكياً</p>
   </header>
 
   <main>
+    <section class="mode-bar">
+      <button class="mode-btn active" data-mode="single">
+        <span class="mode-ico">📄</span>
+        <span class="mode-text"><strong>فايل واحد</strong><span class="mode-sub">قسم واحد فقط</span></span>
+      </button>
+      <button class="mode-btn" data-mode="batch">
+        <span class="mode-ico">🗂️</span>
+        <span class="mode-text"><strong>كل الأقسام</strong><span class="mode-sub">دفعة واحدة + ملف المصنع</span></span>
+      </button>
+    </section>
+
+    <div id="single-mode">
     <section class="card">
       <h2><span class="step">1</span>ارفع فايل الإكسل</h2>
       <div class="dropzone" id="dropzone">
@@ -103,7 +115,6 @@
               <th>Hours</th>
               <th>Approved</th>
               <th>Clarif.</th>
-              <th>Sahar</th>
               <th></th>
             </tr>
           </thead>
@@ -111,6 +122,37 @@
         </table>
       </div>
     </section>
+    </div><!-- /single-mode -->
+
+    <div id="batch-mode" class="hidden">
+      <section class="card">
+        <h2><span class="step">1</span>ملفات الأقسام</h2>
+        <p class="hint-block">ارفع شيت كل قسم واختار اسم القسم الصحيح. تقدر تضيف لحد ١٦ قسم. كل قسم له زر تنزيل خاص بعد الحساب.</p>
+        <div id="batch-depts"></div>
+        <button class="btn btn-secondary" id="btn-add-dept" type="button">+ إضافة قسم جديد</button>
+      </section>
+
+      <section class="card">
+        <h2><span class="step">2</span>الشيت الإجمالي للمصنع</h2>
+        <p class="hint-block">شيت كل موظفين المصنع — هيتسجّل فيه إجمالي ساعات وأيام كل موظف في الأعمدة المخصّصة (Submitted extra working days / hours).</p>
+        <div class="dropzone dropzone-sm" id="batch-overall-dz">
+          <span class="upload-icon">🏭</span>
+          <p><strong>اضغط هنا</strong> أو اسحب فايل المصنع</p>
+          <p class="hint">صيغة .xlsx — أعمدة ID / Name / Department وغيرهم</p>
+          <input type="file" id="batch-overall-input" accept=".xlsx">
+        </div>
+        <div id="batch-overall-status" class="batch-file-status hidden"></div>
+      </section>
+
+      <section class="card">
+        <h2><span class="step">3</span>تشغيل ومعاينة</h2>
+        <div class="batch-controls">
+          <button class="btn btn-primary btn-lg" id="btn-batch-process" disabled>▶ ابدأ الحساب</button>
+          <button class="btn btn-success" id="btn-batch-download-overall" disabled>⬇ تنزيل شيت المصنع</button>
+        </div>
+        <div id="batch-summary" class="hidden"></div>
+      </section>
+    </div><!-- /batch-mode -->
   </main>
 
   <footer>

@@ -51,7 +51,6 @@ let state = {
 // =============================================================================
 // Each dept declares a default role (worker/staff) plus per-name exceptions.
 // Special rules:
-//   - saharAsOt:      sahar shift counts as OT (Approved) instead of Night Hours
 //   - driverBonus:    OT computed as max(0, total_hours − 15) — replaces normal OT
 //   - personOtStart:  { 'Name': 17.0 } — override the OT-start hour for that person
 //   - exemptNames:    these employees never receive OT or day credits
@@ -64,7 +63,7 @@ let state = {
 const DEPARTMENTS = [
   { key: 'general',          label: 'بدون قسم — قواعد عامة فقط',          defaultRole: 'worker' },
   { key: 'Transportation',   label: 'Transportation',   defaultRole: 'worker', driverBonus: true },
-  { key: 'Security',         label: 'Security',         defaultRole: 'worker', staffNames: ['Tamer'], saharAsOt: true },
+  { key: 'Security',         label: 'Security',         defaultRole: 'worker', staffNames: ['Tamer'] },
   { key: 'Finance',          label: 'Finance',          defaultRole: 'staff',  personOtStart: { 'Ahmed Ayman': 17.0 } },
   { key: 'Warehouses',       label: 'Warehouses',       defaultRole: 'worker', exemptNames: ['Khaled Amer', 'Safwat', 'Ayman'] },
   { key: 'Warehouses Sawah', label: 'Warehouses Sawah', defaultRole: 'worker', exemptNames: ['Khaled Amer', 'Safwat', 'Ayman'] },
@@ -212,8 +211,8 @@ function dayName(d) {
 // ---------- core calculation ----------
 function calculateRow(parsed) {
   // parsed: { day, date, id, name, from, to, hours }
-  // Returns: { approved, night, clarification, kind, role }
-  const out = { approved: 0, night: 0, clarification: 0, kind: 'regular', role: 'worker' };
+  // Returns: { approved, clarification, kind, role }
+  const out = { approved: 0, clarification: 0, kind: 'regular', role: 'worker' };
   const s = state.settings;
   const dept = getDeptConfig();
   const role = getEmployeeRole(parsed.name, dept);
@@ -231,7 +230,11 @@ function calculateRow(parsed) {
 
   if (parsed.from == null || parsed.to == null) return out;
   const from = parsed.from;
-  const to = parsed.to;
+  // Excel often stores end-of-day midnight as 0:00 (a `time(0,0)` cell). When that's
+  // followed by a positive From, interpret the 0 as 24:00 so a normal 8:00 → 0:00
+  // shift parses as a full sahar (16h gross, 7:30 OT) instead of returning early.
+  let to = parsed.to;
+  if (to < from && from > 0.01) to += 24;
   const work = to - from;
   if (work <= 0) return out;
 
@@ -291,18 +294,12 @@ function calculateRow(parsed) {
     return out;
   }
 
-  // 2. Sahar shift — full evening to midnight.
+  // 2. Sahar shift — full evening to midnight. Counts as 7:30 OT in Approved
+  //    (matches confirmed files across Security, QC, Production, R&D, QA).
+  //    The chain pass will redistribute when a continuation morning follows.
   if (endsAtMidnight) {
     out.kind = 'sahar';
-    if (dept.saharAsOt) {
-      // Security: night-shift hours count as 7:30 OT in Approved
-      out.approved = s.sahar.total;
-    } else if (role === 'staff') {
-      // Staff sahar — OT (if any) gets recorded on the next-day continuation row
-      // by linkContinuationChains. Leave both approved and night at 0 here.
-    } else {
-      out.night = s.sahar.total;
-    }
+    out.approved = s.sahar.total;
     return out;
   }
 
@@ -322,10 +319,7 @@ function calculateRow(parsed) {
 //           morning = min(to − break, 15:30 cap)
 //   "split" (16:30 < to < 24:00):           sahar keeps 7:30, morning excludes the
 //                                           0-8 "don't count" window
-// Skipped for saharAsOt depts (Security): their sahar is fixed at 7:30 OT.
 function linkContinuationChains(emp) {
-  const dept = getDeptConfig();
-  if (dept.saharAsOt) return;
   const s = state.settings;
   for (let i = 1; i < emp.days.length; i++) {
     const cur = emp.days[i];
@@ -335,18 +329,14 @@ function linkContinuationChains(emp) {
     const t = cur.to;
     if (t == null) continue;
     if (t <= s.shiftEnd + 0.001 || Math.abs(t - s.sahar.end) < 0.01) {
-      // lump
+      // lump: morning absorbs the night
       prev.calc.approved = 0;
-      prev.calc.night = 0;
       let mor = Math.min(t - s.breakMinutes / 60, s.continuationCap);
       if (mor < s.minOtHours) mor = 0;
       cur.calc.approved = mor;
-    } else {
-      // split
-      prev.calc.approved = s.sahar.total;
-      prev.calc.night = 0;
-      // morning keeps its excl-0-8 value from calculateRow()
     }
+    // split: prev.calc.approved stays at 7:30 (already set by calculateRow), morning
+    // keeps its excl-0-8 value
   }
 }
 
@@ -373,17 +363,23 @@ function parseSheet(ws) {
 // Compute totals + per-category breakdown for one employee. Centralised so
 // processWorkbook and recalcAndRender stay in sync.
 function computeEmployeeTotals(e) {
-  let approved = 0, night = 0, clarification = 0;
+  let approved = 0, clarification = 0;
   let friDays = 0, satDays = 0, holDays = 0;
   let daysWorked = 0, otDays = 0, saharDays = 0;
   for (const d of e.days) {
     const c = d.calc;
     if (!c) continue;
     approved += c.approved;
-    night += c.night;
     clarification += c.clarification;
-    const worked = d.from != null && d.to != null && (d.to - d.from) > 0;
-    if (worked) daysWorked++;
+    // Real work occurs when there's a non-negative duration; account for the To=0
+    // (=24) wrap so 8:00 → 0:00 counts as worked.
+    let workSpan = 0;
+    if (d.from != null && d.to != null) {
+      let tt = d.to;
+      if (tt < d.from && d.from > 0.01) tt += 24;
+      workSpan = tt - d.from;
+    }
+    if (workSpan > 0) daysWorked++;
     if (c.kind === 'sahar') saharDays++;
     if (c.approved > 0) otDays++;
     if (c.clarification > 0) {
@@ -393,7 +389,7 @@ function computeEmployeeTotals(e) {
       else holDays += c.clarification;
     }
   }
-  return { approved, night, clarification, friDays, satDays, holDays, daysWorked, otDays, saharDays };
+  return { approved, clarification, friDays, satDays, holDays, daysWorked, otDays, saharDays };
 }
 
 function processWorkbook(wb) {
@@ -499,18 +495,16 @@ function renderSummary() {
     ? state.employees.filter(e => String(e.id) === String(filterId))
     : state.employees;
   const totalEmp = list.length;
-  let totApproved = 0, totNight = 0, totClarif = 0;
+  let totApproved = 0, totClarif = 0;
   let totFri = 0, totSat = 0, totHol = 0;
-  let totDaysWorked = 0, totOtDays = 0, totSaharDays = 0;
+  let totDaysWorked = 0, totSaharDays = 0;
   for (const e of list) {
     totApproved += e.totals.approved;
-    totNight += e.totals.night;
     totClarif += e.totals.clarification;
     totFri += e.totals.friDays;
     totSat += e.totals.satDays;
     totHol += e.totals.holDays;
     totDaysWorked += e.totals.daysWorked;
-    totOtDays += e.totals.otDays;
     totSaharDays += e.totals.saharDays;
   }
   const grid = document.getElementById('summary-grid');
@@ -519,7 +513,7 @@ function renderSummary() {
     <div class="summary-card"><div class="num">${totalEmp}</div><div class="lbl">${empLabel}</div></div>
     <div class="summary-card amber"><div class="num">${totDaysWorked}</div><div class="lbl">أيام العمل الفعلية</div></div>
     <div class="summary-card green"><div class="num">${hoursToHHMM(totApproved) || '0:00'}</div><div class="lbl">إجمالي الأوفر تايم</div></div>
-    <div class="summary-card purple"><div class="num">${hoursToHHMM(totNight) || '0:00'}</div><div class="lbl">إجمالي ساعات السهر</div></div>
+    <div class="summary-card purple"><div class="num">${totSaharDays}</div><div class="lbl">ليالي السهر</div></div>
     <div class="summary-card cyan"><div class="num">${totClarif}</div><div class="lbl">إجمالي أيام Clarification</div></div>
     <div class="summary-card emerald"><div class="num">${totFri}</div><div class="lbl">أيام الجمعات</div></div>
     <div class="summary-card sky"><div class="num">${totSat}</div><div class="lbl">أيام السبت</div></div>
@@ -556,7 +550,7 @@ function renderEmployeeDetail(filterId) {
       </div>
       <div class="emp-stats">
         <div class="estat"><div class="estat-num">${hoursToHHMM(t.approved) || '0:00'}</div><div class="estat-lbl">إجمالي الأوفر تايم</div></div>
-        <div class="estat purple"><div class="estat-num">${hoursToHHMM(t.night) || '0:00'}</div><div class="estat-lbl">السهر (${t.saharDays} ليلة)</div></div>
+        <div class="estat purple"><div class="estat-num">${t.saharDays}</div><div class="estat-lbl">ليالي السهر</div></div>
         <div class="estat emerald"><div class="estat-num">${t.friDays}</div><div class="estat-lbl">أيام جمعة</div></div>
         <div class="estat sky"><div class="estat-num">${t.satDays}</div><div class="estat-lbl">أيام سبت</div></div>
         <div class="estat rose"><div class="estat-num">${t.holDays}</div><div class="estat-lbl">أيام أعياد</div></div>
@@ -596,7 +590,6 @@ function renderPreview() {
         <td class="cell-num">${hoursToHHMM(d.hours)}</td>
         <td class="cell-num"><strong>${hoursToHHMM(calc.approved)}</strong></td>
         <td class="cell-num">${calc.clarification || ''}</td>
-        <td class="cell-num"><strong>${hoursToHHMM(calc.night)}</strong></td>
         <td>${tag}</td>
       `;
       tbody.appendChild(tr);
@@ -616,7 +609,6 @@ function renderPreview() {
       <td class="cell-num">${hoursToHHMM(totalRaw)}</td>
       <td class="cell-num"><strong>${hoursToHHMM(e.totals.approved)}</strong></td>
       <td class="cell-num">${e.totals.clarification || ''}</td>
-      <td class="cell-num"><strong>${hoursToHHMM(e.totals.night)}</strong></td>
       <td></td>
     `;
     tbody.appendChild(tr);
@@ -673,12 +665,6 @@ async function exportXlsx() {
     const v = ws.getCell(r, 8).value;
     if (v && String(v).toLowerCase().includes('approved')) { headerRowNum = r; break; }
   }
-  // Set header for new "Night Hours" column in column J (10)
-  const nightHeader = ws.getCell(headerRowNum, 10);
-  // Copy style from neighbouring header cell so the new header matches
-  const refHeader = ws.getCell(headerRowNum, 9);
-  nightHeader.value = 'Night Hours';
-  if (refHeader.style) nightHeader.style = JSON.parse(JSON.stringify(refHeader.style));
 
   // Build an index of (id, dateISO) → calculation so we can match by content even if rows shift
   const byKey = new Map();
@@ -706,10 +692,8 @@ async function exportXlsx() {
         const totRefFont = rowRefFont(ws, r);
         const hT = ws.getCell(r, 8);
         const iT = ws.getCell(r, 9);
-        const jT = ws.getCell(r, 10);
         setCellWithFormat(hT, tot.approved ? tot.approved / 24 : null, '[h]:mm', totRefFont);
         setCellWithFormat(iT, tot.clarification || null, '0', totRefFont);
-        setCellWithFormat(jT, tot.night ? tot.night / 24 : null, '[h]:mm', totRefFont);
       }
       currentEmpId = null;
       continue;
@@ -737,11 +721,10 @@ async function exportXlsx() {
     const calc = byKey.get(`${id}|${dateStr}`);
     if (!calc) continue;
 
-    // Set Approved (H), Clarification (I), Night Hours (J)
+    // Set Approved (H), Clarification (I)
     const hCell = ws.getCell(r, 8);
     const iCell = ws.getCell(r, 9);
-    const jCell = ws.getCell(r, 10);
-    // Pull the row's font (from Name/Day cells) so red-row text stays red in H/I/J too
+    // Pull the row's font (from Name/Day cells) so red-row text stays red in H/I too
     const refFont = rowRefFont(ws, r);
 
     setCellWithFormat(hCell, calc.approved ? calc.approved / 24 : null, '[h]:mm', refFont);
@@ -749,16 +732,7 @@ async function exportXlsx() {
     // can't be misread as a time fraction (Excel renders "1" as "24:00" when a time
     // number-format is inherited from a sibling cell's shared style).
     setCellWithFormat(iCell, calc.clarification || null, '0', refFont);
-    if (calc.night) {
-      setCellWithFormat(jCell, calc.night / 24, '[h]:mm', refFont);
-    } else {
-      jCell.value = null;
-    }
   }
-
-  // Ensure column J has a reasonable width
-  const colJ = ws.getColumn(10);
-  if (!colJ.width || colJ.width < 11) colJ.width = 11;
 
   const out = await wb.xlsx.writeBuffer();
   const filename = (state.fileName || 'overtime').replace(/\.xlsx$/i, '') + '-calculated.xlsx';
@@ -803,6 +777,7 @@ function handleFile(file) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  initBatchMode();
   loadHolidaysFromStorage();
   // Display the count of active holidays so users can see they're loaded
   const countEl = document.getElementById('holiday-count');
@@ -908,4 +883,363 @@ function renderDeptInfo() {
     </div>
   `;
   panel.classList.remove('hidden');
+}
+
+// =============================================================================
+// BATCH MODE — multi-department upload + overall factory sheet
+// =============================================================================
+const batch = {
+  mode: 'single',          // 'single' | 'batch'
+  depts: [],               // [{ slotId, deptKey, file, bytes, fileName, employees, processed, error }]
+  overall: null,           // { file, bytes, fileName, rowCount }
+  overallOutBytes: null,   // ArrayBuffer of the calculated overall workbook
+  nextSlotId: 1,
+};
+
+function initBatchMode() {
+  // Mode toggle buttons
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => setBatchMode(btn.dataset.mode));
+  });
+  // Seed batch mode with a couple of empty slots so the UI isn't blank
+  addDeptSlot(); addDeptSlot();
+
+  document.getElementById('btn-add-dept').addEventListener('click', () => {
+    if (batch.depts.length >= 16) return;
+    addDeptSlot();
+    renderBatchDepts();
+  });
+
+  // Overall sheet dropzone
+  const odz = document.getElementById('batch-overall-dz');
+  const ofi = document.getElementById('batch-overall-input');
+  odz.addEventListener('click', () => ofi.click());
+  odz.addEventListener('dragover', (e) => { e.preventDefault(); odz.classList.add('drag'); });
+  odz.addEventListener('dragleave', () => odz.classList.remove('drag'));
+  odz.addEventListener('drop', (e) => {
+    e.preventDefault();
+    odz.classList.remove('drag');
+    if (e.dataTransfer.files.length) loadOverallFile(e.dataTransfer.files[0]);
+  });
+  ofi.addEventListener('change', () => { if (ofi.files[0]) loadOverallFile(ofi.files[0]); });
+
+  document.getElementById('btn-batch-process').addEventListener('click', batchProcessAll);
+  document.getElementById('btn-batch-download-overall').addEventListener('click', batchDownloadOverall);
+}
+
+function setBatchMode(mode) {
+  batch.mode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  document.getElementById('single-mode').classList.toggle('hidden', mode !== 'single');
+  document.getElementById('batch-mode').classList.toggle('hidden', mode !== 'batch');
+  if (mode === 'batch') renderBatchDepts();
+}
+
+function addDeptSlot() {
+  batch.depts.push({
+    slotId: 'd' + (batch.nextSlotId++),
+    deptKey: 'general',
+    file: null,
+    bytes: null,
+    fileName: '',
+    employees: [],
+    processed: false,
+    error: null,
+  });
+}
+
+function renderBatchDepts() {
+  const wrap = document.getElementById('batch-depts');
+  wrap.innerHTML = '';
+  batch.depts.forEach((slot, i) => {
+    const div = document.createElement('div');
+    div.className = 'dept-slot' + (slot.processed ? ' processed' : '') + (slot.error ? ' error' : '');
+    div.dataset.slotId = slot.slotId;
+    const deptOptions = DEPARTMENTS.map(d =>
+      `<option value="${d.key}" ${d.key === slot.deptKey ? 'selected' : ''}>${d.label}</option>`
+    ).join('');
+    const fname = slot.fileName
+      ? `<span class="fname">${slot.fileName}</span>`
+      : '<span class="fname empty">لم يتم رفع ملف</span>';
+    let meta = '';
+    if (slot.error) meta = `<span class="meta">⚠ ${slot.error}</span>`;
+    else if (slot.processed) meta = `<span class="meta">✓ ${slot.employees.length} موظف</span>`;
+    else if (slot.bytes) meta = `<span class="meta">جاهز للحساب</span>`;
+    div.innerHTML = `
+      <div class="dept-slot-num">${i + 1}</div>
+      <select data-action="dept">${deptOptions}</select>
+      <div class="dept-slot-file">
+        <label>📂 رفع/تغيير<input type="file" accept=".xlsx" data-action="upload"></label>
+        ${fname}
+      </div>
+      ${meta}
+      <div class="dept-slot-actions">
+        ${slot.processed ? '<button class="btn btn-success btn-sm" data-action="download">⬇</button>' : ''}
+        <button class="btn btn-danger btn-sm" data-action="remove" title="حذف">✕</button>
+      </div>
+    `;
+    div.querySelector('[data-action="dept"]').addEventListener('change', (e) => {
+      slot.deptKey = e.target.value;
+      slot.processed = false;  // dept change invalidates prior calc
+      slot.employees = [];
+      slot.error = null;
+      renderBatchDepts();
+      updateBatchProcessButton();
+    });
+    div.querySelector('[data-action="upload"]').addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      if (f) loadDeptFile(slot, f);
+    });
+    div.querySelector('[data-action="remove"]').addEventListener('click', () => {
+      batch.depts = batch.depts.filter(s => s.slotId !== slot.slotId);
+      renderBatchDepts();
+      updateBatchProcessButton();
+    });
+    const dlBtn = div.querySelector('[data-action="download"]');
+    if (dlBtn) dlBtn.addEventListener('click', () => batchDownloadDept(slot));
+    wrap.appendChild(div);
+  });
+  updateBatchProcessButton();
+}
+
+function loadDeptFile(slot, file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    slot.bytes = e.target.result;
+    slot.file = file;
+    slot.fileName = file.name;
+    slot.processed = false;
+    slot.employees = [];
+    slot.error = null;
+    renderBatchDepts();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function loadOverallFile(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    batch.overall = {
+      file,
+      bytes: e.target.result,
+      fileName: file.name,
+      rowCount: 0,
+    };
+    // Quick parse to count rows (best-effort)
+    try {
+      const data = new Uint8Array(e.target.result.slice(0));
+      const wb = XLSX.read(data, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const ref = ws['!ref'];
+      if (ref) {
+        const range = XLSX.utils.decode_range(ref);
+        batch.overall.rowCount = Math.max(0, range.e.r - 1);  // minus header
+      }
+    } catch { /* ignore */ }
+    const el = document.getElementById('batch-overall-status');
+    el.innerHTML = `<span>${file.name}</span> <strong>·</strong> <span>~${batch.overall.rowCount} موظف</span>`;
+    el.classList.remove('hidden');
+    batch.overallOutBytes = null;
+    document.getElementById('btn-batch-download-overall').disabled = true;
+    updateBatchProcessButton();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function updateBatchProcessButton() {
+  const hasDept = batch.depts.some(s => s.bytes);
+  const hasOverall = batch.overall && batch.overall.bytes;
+  document.getElementById('btn-batch-process').disabled = !(hasDept && hasOverall);
+}
+
+async function batchProcessAll() {
+  const btn = document.getElementById('btn-batch-process');
+  btn.disabled = true;
+  btn.textContent = '⏳ جاري الحساب…';
+  try {
+    // Process each dept slot
+    let totalEmps = 0, totalDays = 0;
+    const savedDept = state.settings.department;
+    for (const slot of batch.depts) {
+      if (!slot.bytes) continue;
+      try {
+        state.settings.department = slot.deptKey;
+        const data = new Uint8Array(slot.bytes.slice(0));
+        const wb = XLSX.read(data, { type: 'array', cellDates: true });
+        const employees = processWorkbookFor(wb);
+        slot.employees = employees;
+        slot.processed = true;
+        slot.error = null;
+        totalEmps += employees.length;
+        totalDays += employees.reduce((a, e) => a + e.days.length, 0);
+      } catch (err) {
+        console.error(err);
+        slot.error = err.message || 'فشل القراءة';
+        slot.processed = false;
+      }
+    }
+    state.settings.department = savedDept;
+
+    // Fill the overall sheet
+    let filledRows = 0, unmatchedIds = 0;
+    if (batch.overall && batch.overall.bytes) {
+      const result = await fillOverallSheet();
+      batch.overallOutBytes = result.bytes;
+      filledRows = result.filled;
+      unmatchedIds = result.unmatched;
+      document.getElementById('btn-batch-download-overall').disabled = false;
+    }
+    renderBatchDepts();
+    renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds);
+  } finally {
+    btn.textContent = '▶ ابدأ الحساب';
+    updateBatchProcessButton();
+  }
+}
+
+// Parse + calculate one workbook and return the employees array (without mutating
+// global state.employees). Mirrors processWorkbook() but returns local data.
+function processWorkbookFor(wb) {
+  const sheetName = wb.SheetNames[0];
+  const ws = wb.Sheets[sheetName];
+  const rows = parseSheet(ws);
+  const cv = (c) => (c && typeof c === 'object' && 'v' in c) ? c.v : c;
+  const employees = [];
+  let cur = null;
+  for (let i = 6; i < rows.length; i++) {
+    const r = rows[i];
+    const dayVal = cv(r[0]);
+    const idVal = cv(r[2]);
+    const nameVal = cv(r[3]);
+    if (dayVal == null && idVal == null && nameVal == null) continue;
+    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
+      if (cur) { cur.totalRowIndex = i; employees.push(cur); cur = null; }
+      continue;
+    }
+    if (idVal == null || nameVal == null) continue;
+    if (!cur || cur.id !== idVal) {
+      if (cur) employees.push(cur);
+      cur = { id: idVal, name: String(nameVal).trim(), days: [], firstRowIndex: i };
+    }
+    cur.days.push({
+      rowIndex: i,
+      day: dayVal,
+      date: cellToDate(r[1]),
+      id: idVal,
+      name: String(nameVal).trim(),
+      from: cellToHours(r[4]),
+      to: cellToHours(r[5]),
+      hours: cellToHours(r[6]),
+    });
+  }
+  if (cur) employees.push(cur);
+  for (const e of employees) {
+    for (const d of e.days) d.calc = calculateRow(d);
+    linkContinuationChains(e);
+    e.totals = computeEmployeeTotals(e);
+  }
+  return employees;
+}
+
+// Read overall factory sheet, locate each row by ID, write totals into the
+// "Submitted extra working days" (G) and "Submitted extra working hours" (I) columns.
+// Returns { bytes, filled, unmatched }.
+async function fillOverallSheet() {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(batch.overall.bytes);
+  // Build (id → totals) map across ALL depts
+  const byId = new Map();
+  for (const slot of batch.depts) {
+    if (!slot.processed) continue;
+    for (const e of slot.employees) {
+      byId.set(String(e.id).trim(), {
+        hours: e.totals.approved,
+        days: e.totals.clarification,
+      });
+    }
+  }
+  let filled = 0;
+  const matchedIds = new Set();
+  for (const ws of wb.worksheets) {
+    // Look for ID and submission columns in the header row
+    let idCol = 0, daysCol = 0, hoursCol = 0;
+    for (let c = 1; c <= ws.columnCount; c++) {
+      const hv = String(ws.getCell(1, c).value || '').toLowerCase();
+      if (hv === 'id' && !idCol) idCol = c;
+      if (hv.includes('submitted') && hv.includes('working days') && !daysCol) daysCol = c;
+      if (hv.includes('submitted') && hv.includes('working hours') && !hoursCol) hoursCol = c;
+    }
+    if (!idCol) continue;  // not a roster sheet
+    for (let r = 2; r <= ws.rowCount; r++) {
+      const idVal = ws.getCell(r, idCol).value;
+      if (idVal == null) continue;
+      const key = String(idVal).trim();
+      const m = byId.get(key);
+      if (!m) continue;
+      matchedIds.add(key);
+      const refFont = rowRefFont(ws, r);
+      if (daysCol && m.days) {
+        setCellWithFormat(ws.getCell(r, daysCol), m.days, '0', refFont);
+      }
+      if (hoursCol && m.hours) {
+        setCellWithFormat(ws.getCell(r, hoursCol), m.hours / 24, '[h]:mm', refFont);
+      }
+      filled++;
+    }
+  }
+  const unmatched = byId.size - matchedIds.size;
+  const bytes = await wb.xlsx.writeBuffer();
+  return { bytes, filled, unmatched };
+}
+
+function batchDownloadDept(slot) {
+  if (!slot.bytes || !slot.processed) return;
+  // Reuse the existing exportXlsx by temporarily swapping state, then restore.
+  const saved = {
+    employees: state.employees,
+    originalBytes: state.originalBytes,
+    fileName: state.fileName,
+    department: state.settings.department,
+  };
+  state.employees = slot.employees;
+  state.originalBytes = slot.bytes;
+  state.fileName = slot.fileName;
+  state.settings.department = slot.deptKey;
+  exportXlsx().finally(() => {
+    state.employees = saved.employees;
+    state.originalBytes = saved.originalBytes;
+    state.fileName = saved.fileName;
+    state.settings.department = saved.department;
+  });
+}
+
+function batchDownloadOverall() {
+  if (!batch.overallOutBytes) return;
+  const filename = (batch.overall.fileName || 'overall').replace(/\.xlsx$/i, '') + '-calculated.xlsx';
+  const blob = new Blob([batch.overallOutBytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+}
+
+function renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds) {
+  const el = document.getElementById('batch-summary');
+  const processedDepts = batch.depts.filter(s => s.processed).length;
+  const hasOverall = !!batch.overallOutBytes;
+  el.innerHTML = `
+    <div class="batch-stats">
+      <div class="batch-stat"><div class="batch-stat-num">${processedDepts}</div><div class="batch-stat-lbl">قسم اتحسب</div></div>
+      <div class="batch-stat"><div class="batch-stat-num">${totalEmps}</div><div class="batch-stat-lbl">إجمالي الموظفين</div></div>
+      <div class="batch-stat"><div class="batch-stat-num">${totalDays}</div><div class="batch-stat-lbl">إجمالي الأيام</div></div>
+      ${hasOverall ? `<div class="batch-stat"><div class="batch-stat-num">${filledRows}</div><div class="batch-stat-lbl">صف اتعبّى في شيت المصنع</div></div>` : ''}
+    </div>
+    ${unmatchedIds > 0
+      ? `<div class="batch-warn">⚠ في ${unmatchedIds} موظف من شيتات الأقسام مالقاش له صف في شيت المصنع — تأكد إن الـ IDs متطابقة.</div>`
+      : ''}
+  `;
+  el.classList.remove('hidden');
 }
