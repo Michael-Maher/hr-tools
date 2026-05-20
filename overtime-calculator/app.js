@@ -583,13 +583,30 @@ function renderPreview() {
 // Set a cell's value and number format without leaking the format to sibling
 // cells that share the same underlying style object. ExcelJS stores `style` by
 // reference, so we must deep-copy it before mutating numFmt.
-function setCellWithFormat(cell, value, numFmt) {
+function setCellWithFormat(cell, value, numFmt, refFont) {
   // Build the plain style object first, then assign — this avoids ExcelJS losing the
   // numFmt override when cell.numFmt is set after a style-object assignment.
   const style = cell.style ? JSON.parse(JSON.stringify(cell.style)) : {};
   if (value != null) style.numFmt = numFmt;
+  // Inherit the row's font (e.g. red text) when the target cell has none of its own.
+  // The H/I/J cells in the raw monthly file are usually empty → no font → values
+  // would otherwise render in black and break the row's color coding.
+  if (refFont && !style.font) {
+    style.font = JSON.parse(JSON.stringify(refFont));
+  }
   cell.value = value;
   cell.style = style;
+}
+
+// Pick a reference font for this row by looking at the first column that carries one.
+// Falls back to the row's default font.
+function rowRefFont(ws, r) {
+  for (const col of [4, 1, 2, 3, 5, 6, 7]) {
+    const c = ws.getCell(r, col);
+    if (c && c.font) return JSON.parse(JSON.stringify(c.font));
+  }
+  const row = ws.getRow(r);
+  return row.font ? JSON.parse(JSON.stringify(row.font)) : null;
 }
 
 async function exportXlsx() {
@@ -634,12 +651,13 @@ async function exportXlsx() {
       if (currentEmpId == null) continue;
       const tot = byKey.get(`total|${currentEmpId}`);
       if (tot) {
+        const totRefFont = rowRefFont(ws, r);
         const hT = ws.getCell(r, 8);
         const iT = ws.getCell(r, 9);
         const jT = ws.getCell(r, 10);
-        setCellWithFormat(hT, tot.approved ? tot.approved / 24 : null, '[h]:mm');
-        setCellWithFormat(iT, tot.clarification || null, '0');
-        setCellWithFormat(jT, tot.night ? tot.night / 24 : null, '[h]:mm');
+        setCellWithFormat(hT, tot.approved ? tot.approved / 24 : null, '[h]:mm', totRefFont);
+        setCellWithFormat(iT, tot.clarification || null, '0', totRefFont);
+        setCellWithFormat(jT, tot.night ? tot.night / 24 : null, '[h]:mm', totRefFont);
       }
       currentEmpId = null;
       continue;
@@ -671,14 +689,16 @@ async function exportXlsx() {
     const hCell = ws.getCell(r, 8);
     const iCell = ws.getCell(r, 9);
     const jCell = ws.getCell(r, 10);
+    // Pull the row's font (from Name/Day cells) so red-row text stays red in H/I/J too
+    const refFont = rowRefFont(ws, r);
 
-    setCellWithFormat(hCell, calc.approved ? calc.approved / 24 : null, '[h]:mm');
+    setCellWithFormat(hCell, calc.approved ? calc.approved / 24 : null, '[h]:mm', refFont);
     // Clarification holds a day count (1, 2, 3) — force integer format so the cell
     // can't be misread as a time fraction (Excel renders "1" as "24:00" when a time
     // number-format is inherited from a sibling cell's shared style).
-    setCellWithFormat(iCell, calc.clarification || null, '0');
+    setCellWithFormat(iCell, calc.clarification || null, '0', refFont);
     if (calc.night) {
-      setCellWithFormat(jCell, calc.night / 24, '[h]:mm');
+      setCellWithFormat(jCell, calc.night / 24, '[h]:mm', refFont);
     } else {
       jCell.value = null;
     }
