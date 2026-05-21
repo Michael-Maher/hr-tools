@@ -1151,20 +1151,41 @@ function processWorkbookFor(wb) {
   return employees;
 }
 
-// Read overall factory sheet, match each row by employee ID (col A), and write
-// computed totals into the fixed columns the template defines:
-//   col G (7) = "Submitted extra working days"  ← e.totals.clarification
-//   col I (9) = "Submitted extra working hours" ← e.totals.approved
-// Everything else — file name, sheet names, headers, formatting, formulas,
-// untouched cells — stays exactly as uploaded.
-const OVERALL_ID_COL = 1;     // A
-const OVERALL_DAYS_COL = 7;   // G
-const OVERALL_HOURS_COL = 9;  // I
-
+// Fill the overall factory sheet by matching each row's employee ID (col A) and
+// writing computed totals into:
+//   col G = "Submitted extra working days"  ← e.totals.clarification
+//   col I = "Submitted extra working hours" ← e.totals.approved
+//
+// IMPORTANT — we don't use ExcelJS here. ExcelJS doesn't model embedded drawings,
+// external links, printer settings or the calc chain, and silently drops those
+// parts on writeBuffer(). Excel then reports the resulting file as corrupted.
+// Instead we open the .xlsx as a ZIP (JSZip), parse ONLY xl/worksheets/sheet1.xml,
+// edit the G and I cells we care about, then repack. Every other part of the
+// archive (styles, images, formulas, second sheet, printer settings, calc chain,
+// shared strings) is preserved byte-for-byte.
 async function fillOverallSheet() {
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(batch.overall.bytes);
-  // Build (id → totals) map across ALL depts
+  const zip = await JSZip.loadAsync(batch.overall.bytes);
+  const sheetEntry = zip.file('xl/worksheets/sheet1.xml');
+  if (!sheetEntry) throw new Error('Overall sheet missing xl/worksheets/sheet1.xml');
+  const sheetXml = await sheetEntry.async('text');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(sheetXml, 'application/xml');
+  const err = doc.querySelector('parsererror');
+  if (err) throw new Error('فشل قراءة sheet1.xml: ' + err.textContent);
+
+  // Read shared strings in case any ID happens to be stored as a shared string.
+  const ssEntry = zip.file('xl/sharedStrings.xml');
+  let sharedStrings = [];
+  if (ssEntry) {
+    const ssXml = await ssEntry.async('text');
+    const ssDoc = parser.parseFromString(ssXml, 'application/xml');
+    sharedStrings = Array.from(ssDoc.getElementsByTagName('si')).map(si => {
+      const t = si.getElementsByTagName('t')[0];
+      return t ? t.textContent : '';
+    });
+  }
+
+  // Build id → totals map across all processed dept slots
   const byId = new Map();
   for (const slot of batch.depts) {
     if (!slot.processed) continue;
@@ -1175,31 +1196,108 @@ async function fillOverallSheet() {
       });
     }
   }
+
+  const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const sheetData = doc.getElementsByTagName('sheetData')[0];
+  if (!sheetData) throw new Error('No <sheetData> element in sheet1.xml');
+  const rows = sheetData.getElementsByTagName('row');
   let filled = 0;
   const matchedIds = new Set();
-  for (const ws of wb.worksheets) {
-    // Walk rows starting at row 2 (skip header). Stop scanning the sheet when
-    // there are no more IDs.
-    for (let r = 2; r <= ws.rowCount; r++) {
-      const idVal = ws.getCell(r, OVERALL_ID_COL).value;
-      if (idVal == null) continue;
-      const key = String(idVal).trim();
-      const m = byId.get(key);
-      if (!m) continue;
-      matchedIds.add(key);
-      const refFont = rowRefFont(ws, r);
-      if (m.days) {
-        setCellWithFormat(ws.getCell(r, OVERALL_DAYS_COL), m.days, '0', refFont);
-      }
-      if (m.hours) {
-        setCellWithFormat(ws.getCell(r, OVERALL_HOURS_COL), m.hours / 24, '[h]:mm', refFont);
-      }
-      filled++;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const rowNum = row.getAttribute('r');
+    if (!rowNum) continue;
+    // Locate A, G, I cells in this row
+    const cells = row.getElementsByTagName('c');
+    let aCell = null, gCell = null, iCell = null;
+    for (let ci = 0; ci < cells.length; ci++) {
+      const ref = cells[ci].getAttribute('r');
+      if (ref === 'A' + rowNum) aCell = cells[ci];
+      else if (ref === 'G' + rowNum) gCell = cells[ci];
+      else if (ref === 'I' + rowNum) iCell = cells[ci];
+    }
+    if (!aCell) continue;
+    const vEl = aCell.getElementsByTagName('v')[0];
+    if (!vEl) continue;
+    let idStr = vEl.textContent.trim();
+    if (aCell.getAttribute('t') === 's') {
+      const idx = parseInt(idStr, 10);
+      idStr = sharedStrings[idx] || '';
+    }
+    const m = byId.get(String(idStr).trim());
+    if (!m) continue;
+    matchedIds.add(String(idStr).trim());
+
+    if (m.days) {
+      setSheetCellNumeric(doc, row, NS, 'G', rowNum, m.days, gCell);
+    }
+    if (m.hours) {
+      // The template's I column is formatted as a decimal number (s="17" → "0.00"),
+      // not as a time fraction — so write hours directly. e.g. 7:30 → 7.5.
+      setSheetCellNumeric(doc, row, NS, 'I', rowNum, m.hours, iCell);
+    }
+    filled++;
+  }
+
+  // Serialize back. XMLSerializer drops the XML declaration; re-add it.
+  const serializer = new XMLSerializer();
+  let newXml = serializer.serializeToString(doc);
+  if (!/^<\?xml/.test(newXml)) {
+    newXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + newXml;
+  }
+  zip.file('xl/worksheets/sheet1.xml', newXml);
+  // Generate fresh archive bytes — every other entry is preserved untouched.
+  // DEFLATE compression keeps the file size close to the original (without it the
+  // embedded drawings re-emit at full ~8.7MB instead of the 295KB compressed size).
+  const outBytes = await zip.generateAsync({
+    type: 'arraybuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+  const unmatched = byId.size - matchedIds.size;
+  return { bytes: outBytes, filled, unmatched };
+}
+
+// Replace (or create) a numeric value in a sheet1.xml <c> cell. Preserves the
+// cell's existing style reference (s="N") so number formats remain intact.
+function setSheetCellNumeric(doc, row, NS, colLetter, rowNum, value, existingCell) {
+  let cell = existingCell;
+  if (!cell) {
+    cell = doc.createElementNS(NS, 'c');
+    cell.setAttribute('r', colLetter + rowNum);
+    insertCellInSortedPosition(row, cell, colLetter);
+  }
+  // Remove any prior value, formula, inline string, etc.
+  while (cell.firstChild) cell.removeChild(cell.firstChild);
+  // Strip type attribute — numeric is the default and 't' tags like "s" or "str"
+  // would tell Excel to interpret our number as a shared-string index.
+  if (cell.hasAttribute('t')) cell.removeAttribute('t');
+  const v = doc.createElementNS(NS, 'v');
+  v.textContent = String(value);
+  cell.appendChild(v);
+}
+
+function colLetterToIndex(letter) {
+  let n = 0;
+  for (let i = 0; i < letter.length; i++) {
+    n = n * 26 + (letter.charCodeAt(i) - 64);
+  }
+  return n;
+}
+
+function insertCellInSortedPosition(row, newCell, colLetter) {
+  const targetIdx = colLetterToIndex(colLetter);
+  const cells = row.getElementsByTagName('c');
+  for (let i = 0; i < cells.length; i++) {
+    const ref = cells[i].getAttribute('r');
+    const m = ref && ref.match(/^([A-Z]+)\d+$/);
+    if (!m) continue;
+    if (colLetterToIndex(m[1]) > targetIdx) {
+      row.insertBefore(newCell, cells[i]);
+      return;
     }
   }
-  const unmatched = byId.size - matchedIds.size;
-  const bytes = await wb.xlsx.writeBuffer();
-  return { bytes, filled, unmatched };
+  row.appendChild(newCell);
 }
 
 function batchDownloadDept(slot) {
