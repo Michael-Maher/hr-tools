@@ -1091,16 +1091,24 @@ async function batchProcessAll() {
     state.settings.department = savedDept;
 
     // Fill the overall sheet
-    let filledRows = 0, unmatchedIds = 0;
+    let filledRows = 0, unmatchedIds = 0, overallError = null;
     if (batch.overall && batch.overall.bytes) {
-      const result = await fillOverallSheet();
-      batch.overallOutBytes = result.bytes;
-      filledRows = result.filled;
-      unmatchedIds = result.unmatched;
-      document.getElementById('btn-batch-download-overall').disabled = false;
+      try {
+        const result = await fillOverallSheet();
+        batch.overallOutBytes = result.bytes;
+        filledRows = result.filled;
+        unmatchedIds = result.unmatched;
+        document.getElementById('btn-batch-download-overall').disabled = false;
+        console.log(`[batch] Filled ${filledRows} rows in overall sheet (${unmatchedIds} dept-sheet IDs had no match).`);
+      } catch (err) {
+        console.error('[batch] fillOverallSheet failed:', err);
+        overallError = err.message || String(err);
+        batch.overallOutBytes = null;
+        document.getElementById('btn-batch-download-overall').disabled = true;
+      }
     }
     renderBatchDepts();
-    renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds);
+    renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds, overallError);
   } finally {
     btn.textContent = '▶ ابدأ الحساب';
     updateBatchProcessButton();
@@ -1164,6 +1172,9 @@ function processWorkbookFor(wb) {
 // archive (styles, images, formulas, second sheet, printer settings, calc chain,
 // shared strings) is preserved byte-for-byte.
 async function fillOverallSheet() {
+  if (typeof JSZip === 'undefined') {
+    throw new Error('JSZip library لم يتم تحميلها — تأكد من الاتصال بالإنترنت ثم أعد تحميل الصفحة');
+  }
   const zip = await JSZip.loadAsync(batch.overall.bytes);
   const sheetEntry = zip.file('xl/worksheets/sheet1.xml');
   if (!sheetEntry) throw new Error('Overall sheet missing xl/worksheets/sheet1.xml');
@@ -1335,17 +1346,25 @@ function batchDownloadOverall() {
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
 }
 
-function renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds) {
+function renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds, overallError) {
   const el = document.getElementById('batch-summary');
   const processedDepts = batch.depts.filter(s => s.processed).length;
   const hasOverall = !!batch.overallOutBytes;
+  const filledNoneWarning = (hasOverall && filledRows === 0)
+    ? `<div class="batch-warn">⚠ لم يتم تعديل أي صف في شيت المصنع. تأكد إن الـ IDs في شيتات الأقسام موجودة في عمود A (ID) في شيت المصنع.</div>`
+    : '';
+  const errorBox = overallError
+    ? `<div class="batch-warn" style="color:#991b1b;background:#fef2f2;border-color:#fca5a5">❌ خطأ أثناء تحديث شيت المصنع: ${overallError}</div>`
+    : '';
   el.innerHTML = `
     <div class="batch-stats">
       <div class="batch-stat"><div class="batch-stat-num">${processedDepts}</div><div class="batch-stat-lbl">قسم اتحسب</div></div>
       <div class="batch-stat"><div class="batch-stat-num">${totalEmps}</div><div class="batch-stat-lbl">إجمالي الموظفين</div></div>
       <div class="batch-stat"><div class="batch-stat-num">${totalDays}</div><div class="batch-stat-lbl">إجمالي الأيام</div></div>
-      ${hasOverall ? `<div class="batch-stat"><div class="batch-stat-num">${filledRows}</div><div class="batch-stat-lbl">صف اتعبّى في شيت المصنع</div></div>` : ''}
+      ${hasOverall || overallError ? `<div class="batch-stat ${filledRows ? '' : 'batch-stat-warn'}"><div class="batch-stat-num">${filledRows}</div><div class="batch-stat-lbl">صف اتعبّى في شيت المصنع</div></div>` : ''}
     </div>
+    ${filledNoneWarning}
+    ${errorBox}
     ${unmatchedIds > 0
       ? `<div class="batch-warn">⚠ في ${unmatchedIds} موظف من شيتات الأقسام مالقاش له صف في شيت المصنع — تأكد إن الـ IDs متطابقة.</div>`
       : ''}

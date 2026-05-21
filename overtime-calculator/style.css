@@ -541,6 +541,8 @@ main {
   color: #047857;
   font-variant-numeric: tabular-nums;
 }
+.batch-stat.batch-stat-warn { background: #fef2f2; border-color: #fca5a5; }
+.batch-stat.batch-stat-warn .batch-stat-num { color: #b91c1c; }
 .batch-stat-lbl { font-size: 11.5px; color: var(--muted); margin-top: 2px; font-weight: 600; }
 .batch-warn {
   margin-top: 10px;
