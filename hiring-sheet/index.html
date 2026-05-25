@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <meta name="theme-color" content="#4338ca">
+  <title>شيت التعيينات</title>
+  <link rel="stylesheet" href="style.css?v=20260525b">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%234338ca'/%3E%3Ctext x='50' y='62' text-anchor='middle' font-size='44' fill='white'%3E%F0%9F%93%9D%3C/text%3E%3C/svg%3E">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script>
+    if (window['pdfjsLib']) {
+      window['pdfjsLib'].GlobalWorkerOptions.workerSrc =
+        'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    }
+  </script>
+</head>
+<body>
+  <header>
+    <a href="../" class="back-link">← الرجوع للأدوات</a>
+    <h1><span class="icon">📝</span>شيت التعيينات</h1>
+    <p>ارفع صور البطاقة (وش وضهر) و الـ CV عشان نطلع البيانات أوتوماتيكياً، تأكد منها وضيفها للشيت — وفي الآخر نزّل ملف إكسل بكل الموظفين الجداد.</p>
+  </header>
+
+  <main>
+    <!-- step 1: uploads -->
+    <section class="card">
+      <h2><span class="step">1</span>ارفع المستندات</h2>
+      <p class="hint-block">
+        اضغط على أي مربع لرفع صورة (من الكاميرا أو من الجهاز). الـ CV ممكن يكون PDF أو صورة.
+        البرنامج هيحاول يستخرج البيانات تلقائياً — بس <strong>تأكد منها قبل ما تضيف</strong> لأن قراءة الصور مش دايماً مظبوطة 100%.
+      </p>
+
+      <div class="uploads-grid">
+        <label class="upload-card" id="up-front">
+          <input type="file" id="file-front" accept="image/*" capture="environment" hidden>
+          <div class="upload-inner">
+            <div class="upload-ico">🪪</div>
+            <div class="upload-title">وش البطاقة</div>
+            <div class="upload-hint">الاسم • الرقم القومي • العنوان • تاريخ الميلاد</div>
+          </div>
+          <div class="upload-preview hidden"><img alt="ID front"><button class="clear-btn" type="button" title="مسح">×</button></div>
+        </label>
+
+        <label class="upload-card" id="up-back">
+          <input type="file" id="file-back" accept="image/*" capture="environment" hidden>
+          <div class="upload-inner">
+            <div class="upload-ico">🆔</div>
+            <div class="upload-title">ضهر البطاقة</div>
+            <div class="upload-hint">الديانة • المهنة • تاريخ الإصدار والإنتهاء</div>
+          </div>
+          <div class="upload-preview hidden"><img alt="ID back"><button class="clear-btn" type="button" title="مسح">×</button></div>
+        </label>
+
+        <label class="upload-card" id="up-cv">
+          <input type="file" id="file-cv" accept="application/pdf,image/*" hidden>
+          <div class="upload-inner">
+            <div class="upload-ico">📄</div>
+            <div class="upload-title">السيرة الذاتية (CV)</div>
+            <div class="upload-hint">PDF أو صورة — الإيميل • التليفون • الاسم بالإنجليزي</div>
+          </div>
+          <div class="upload-preview hidden"><img alt="CV"><button class="clear-btn" type="button" title="مسح">×</button></div>
+        </label>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-primary" id="btn-extract" disabled>
+          <span class="btn-ico">⚡</span><span>استخرج البيانات</span>
+        </button>
+        <span class="status" id="ocr-status"></span>
+      </div>
+
+      <div class="ocr-raw hidden" id="ocr-raw">
+        <details>
+          <summary>عرض النص الخام اللي طلع من قراءة الصور <span class="muted">(لو الاستخراج مش مظبوط، تقدر تنسخ من هنا)</span></summary>
+          <div class="ocr-raw-grid">
+            <div><h4>وش البطاقة</h4><pre id="raw-front"></pre></div>
+            <div><h4>ضهر البطاقة</h4><pre id="raw-back"></pre></div>
+            <div><h4>السيرة الذاتية</h4><pre id="raw-cv"></pre></div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- step 2: form -->
+    <section class="card">
+      <h2><span class="step">2</span>راجع وأكّد البيانات</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label>الاسم بالعربي <span class="req">*</span></label>
+          <input type="text" id="f-name-ar" dir="rtl" placeholder="مثال: محمد أحمد علي حسن">
+        </div>
+        <div class="field">
+          <label>الاسم بالإنجليزي</label>
+          <input type="text" id="f-name-en" dir="ltr" placeholder="e.g. Mohamed Ahmed Ali Hassan">
+        </div>
+        <div class="field">
+          <label>الرقم القومي (14 رقم) <span class="req">*</span></label>
+          <input type="text" id="f-nid" dir="ltr" inputmode="numeric" maxlength="14" placeholder="14 digit number">
+          <span class="field-hint" id="nid-hint"></span>
+        </div>
+        <div class="field">
+          <label>تاريخ الميلاد</label>
+          <input type="date" id="f-dob">
+          <span class="field-hint">هيتعبّى تلقائياً من الرقم القومي</span>
+        </div>
+        <div class="field">
+          <label>تاريخ انتهاء البطاقة</label>
+          <input type="date" id="f-expiry">
+        </div>
+        <div class="field">
+          <label>الديانة</label>
+          <select id="f-religion">
+            <option value="">— اختار —</option>
+            <option value="مسلم">مسلم</option>
+            <option value="مسيحي">مسيحي</option>
+            <option value="أخرى">أخرى</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>النوع</label>
+          <select id="f-gender">
+            <option value="">— اختار —</option>
+            <option value="ذكر">ذكر</option>
+            <option value="أنثى">أنثى</option>
+          </select>
+          <span class="field-hint">هيتعبّى تلقائياً من الرقم القومي</span>
+        </div>
+        <div class="field">
+          <label>المحافظة (من الرقم القومي)</label>
+          <input type="text" id="f-gov" dir="rtl" readonly placeholder="—">
+        </div>
+        <div class="field">
+          <label>الإيميل</label>
+          <input type="email" id="f-email" dir="ltr" placeholder="name@example.com">
+        </div>
+        <div class="field">
+          <label>التليفون</label>
+          <input type="tel" id="f-phone" dir="ltr" placeholder="01XXXXXXXXX">
+        </div>
+        <div class="field field-full">
+          <label>العنوان (محل الإقامة)</label>
+          <input type="text" id="f-address" dir="rtl" placeholder="مثال: 12 شارع كذا، مدينة نصر، القاهرة">
+        </div>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-success" id="btn-add">
+          <span class="btn-ico">＋</span><span>إضافة للشيت</span>
+        </button>
+        <button class="btn btn-secondary" id="btn-clear">
+          <span class="btn-ico">🧹</span><span>تفريغ الفورم</span>
+        </button>
+        <span class="status" id="form-status"></span>
+      </div>
+    </section>
+
+    <!-- step 3: table -->
+    <section class="card">
+      <h2><span class="step">3</span>الموظفين المُضافين <span class="count-badge" id="row-count">0</span></h2>
+
+      <div class="table-toolbar">
+        <label class="btn btn-secondary">
+          <span class="btn-ico">⬆</span><span>استيراد شيت موجود</span>
+          <input type="file" id="file-import" accept=".xlsx,.xls" hidden>
+        </label>
+        <button class="btn btn-success" id="btn-export" disabled>
+          <span class="btn-ico">⬇</span><span>تنزيل شيت إكسل</span>
+        </button>
+        <button class="btn btn-danger-soft" id="btn-clear-all" disabled>
+          <span class="btn-ico">🗑</span><span>مسح الكل</span>
+        </button>
+        <span class="status" id="table-status"></span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="data-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>الاسم بالعربي</th>
+              <th>English Name</th>
+              <th>الرقم القومي</th>
+              <th>الميلاد</th>
+              <th>الانتهاء</th>
+              <th>النوع</th>
+              <th>الديانة</th>
+              <th>الإيميل</th>
+              <th>التليفون</th>
+              <th>العنوان</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="empty-state">
+          مفيش بيانات لسه — املي الفورم فوق واضغط <strong>إضافة للشيت</strong>.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    HR Tools · Hiring Sheet
+    <div style="margin-top:10px;display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1px solid #fbcfe8;border-radius:99px;padding:6px 14px;font-size:12px;color:#9d174d;font-weight:600;direction:ltr">
+      <span style="font-size:14px">&#10084;&#65039;</span>
+      Designed with love specially for Marioma "Farida"
+      <span style="font-size:14px">&#10084;&#65039;</span>
+    </div>
+  </footer>
+
+  <script src="app.js?v=20260525b"></script>
+</body>
+</html>
