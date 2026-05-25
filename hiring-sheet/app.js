@@ -131,32 +131,10 @@ function refreshExtractBtn() {
   els.btnExtract.disabled = !(files.front || files.back || files.cv);
 }
 
-// ───────── OCR (Tesseract.js v5 — tessdata_best + preprocessing) ─────────
-// Use the high-accuracy LSTM "best" models (vs the default "fast" variant).
-// Significantly better Arabic recognition on ID cards; downloaded once, cached.
-const TESSDATA_BEST = 'https://tessdata.projectnaptha.com/4.0.0_best';
-const _workers = {};
+// ───────── OCR (Tesseract.js v5 — high-level API + image preprocessing) ─────────
 let _workerStatusCb = null;
 
-async function getWorker(langs) {
-  if (_workers[langs]) return _workers[langs];
-  const langArr = Array.isArray(langs) ? langs : langs.split('+');
-  const w = await Tesseract.createWorker(langArr, 1 /* LSTM only */, {
-    langPath: TESSDATA_BEST,
-    cacheMethod: 'write',
-    logger: (m) => {
-      if (_workerStatusCb) _workerStatusCb(m);
-    },
-  });
-  await w.setParameters({
-    tessedit_pageseg_mode: '6', // PSM_SINGLE_BLOCK — best for ID/CV blocks
-    preserve_interword_spaces: '1',
-  });
-  _workers[langs] = w;
-  return w;
-}
-
-// Upscale small images + grayscale + contrast bump → big Arabic accuracy win
+// Upscale small images + grayscale + contrast bump → noticeable accuracy gain
 async function preprocessImage(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -166,7 +144,7 @@ async function preprocessImage(file) {
       im.onerror = () => reject(new Error('failed to load image'));
       im.src = url;
     });
-    const MIN_W = 1600; // ~300 DPI for typical ID card
+    const MIN_W = 1800; // ~300+ DPI for typical ID card
     const scale = img.naturalWidth < MIN_W ? MIN_W / img.naturalWidth : 1;
     const w = Math.round(img.naturalWidth * scale);
     const h = Math.round(img.naturalHeight * scale);
@@ -177,7 +155,7 @@ async function preprocessImage(file) {
     ctx.drawImage(img, 0, 0, w, h);
     const data = ctx.getImageData(0, 0, w, h);
     const px = data.data;
-    const contrast = 1.4;
+    const contrast = 1.25; // gentler than before — too aggressive wipes faint Arabic text
     const intercept = 128 * (1 - contrast);
     for (let i = 0; i < px.length; i += 4) {
       const g = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
@@ -193,8 +171,10 @@ async function preprocessImage(file) {
 
 async function ocrImage(fileOrBlob, langs) {
   const processed = await preprocessImage(fileOrBlob);
-  const worker = await getWorker(langs);
-  const { data } = await worker.recognize(processed);
+  // Simple high-level API: rock-solid, default fast traineddata (~1-2MB per lang)
+  const { data } = await Tesseract.recognize(processed, langs, {
+    logger: (m) => { if (_workerStatusCb) _workerStatusCb(m); },
+  });
   return data.text || '';
 }
 
@@ -236,12 +216,29 @@ async function extractCvText(file) {
 // ───────── extraction heuristics ─────────
 function find14DigitId(text) {
   const n = normalizeDigits(text);
-  // strict
+  // 1. strict — contiguous 14 digits
   const strict = n.match(/(?<!\d)(\d{14})(?!\d)/);
-  if (strict) return strict[1];
-  // tolerant: longest digit run >= 13, then trim
-  const runs = (n.match(/\d{10,}/g) || []).sort((a,b) => b.length - a.length);
-  if (runs[0] && runs[0].length >= 14) return runs[0].slice(0, 14);
+  if (strict) {
+    const parsed = parseNationalId(strict[1]);
+    if (parsed) return strict[1];
+  }
+  // 2. tolerant — collapse "digit (space/punct) digit ..." clusters into one digit run
+  //    Tesseract often outputs the ID as "2 9 5 0 9 0 9 0 1 2 3 4 5 6" or with random punctuation
+  const collapsed = n.replace(/(\d)[\s\-_,.·•]+(?=\d)/g, '$1');
+  const looseMatches = collapsed.match(/\d{14}/g) || [];
+  for (const candidate of looseMatches) {
+    if (parseNationalId(candidate)) return candidate; // first VALID one wins
+  }
+  // 3. last-resort — longest digit run >= 14, trimmed
+  const runs = (collapsed.match(/\d{14,}/g) || []).sort((a, b) => b.length - a.length);
+  for (const r of runs) {
+    for (let i = 0; i <= r.length - 14; i++) {
+      const slice = r.slice(i, i + 14);
+      if (parseNationalId(slice)) return slice;
+    }
+  }
+  // 4. ANY 14-digit run, even if NID parse fails (better than nothing)
+  if (looseMatches[0]) return looseMatches[0];
   return '';
 }
 
@@ -310,9 +307,11 @@ function findEnglishName(text) {
 
 function findArabicNameLines(text) {
   // Return likely name candidates from front of ID:
-  // lines made mostly of Arabic letters, 2+ words, not address-like
+  // lines made mostly of Arabic letters, 2+ words, not address/title-like
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const addressKw = /(شارع|محافظة|مدينة|قسم|مركز|حي|ميدان|عمارة|طريق|طنطا|الإسكندرية|القاهرة)/;
+  const addressKw = /(شارع|محافظة|مدينة|قسم|مركز|حي|ميدان|عمارة|طريق|طنطا|الإسكندرية|القاهرة|الجيزة)/;
+  // Standard ID-card boilerplate that's not a person's name
+  const titleKw = /(جمهورية|العربية|بطاقة|تحقيق|الشخصية|الرقم|القومي|محل|الإقامة|الميلاد|تاريخ|الديانة|المهنة|الإصدار|الانتهاء|النوع|الحالة|الاجتماعية)/;
   const cands = [];
   for (const ln of lines) {
     const letters = (ln.match(/[؀-ۿ]/g) || []).length;
@@ -320,6 +319,7 @@ function findArabicNameLines(text) {
     if (letters < 6) continue;
     if (nonLetters > letters * 0.5) continue;
     if (addressKw.test(ln)) continue;
+    if (titleKw.test(ln)) continue;
     if (/\d/.test(ln)) continue;
     const words = ln.split(/\s+/).filter(w => /[؀-ۿ]/.test(w));
     if (words.length >= 2) cands.push(ln);
@@ -360,15 +360,26 @@ async function runExtraction() {
     if (files.cv)    tasks.push(extractCvText(files.cv).then(t => rawText.cv = t));
     await Promise.all(tasks);
 
-    els.rawFront.textContent = rawText.front || '—';
-    els.rawBack.textContent  = rawText.back  || '—';
-    els.rawCv.textContent    = rawText.cv    || '—';
+    renderRawText('rawFront', rawText.front);
+    renderRawText('rawBack',  rawText.back);
+    renderRawText('rawCv',    rawText.cv);
     els.ocrRaw.classList.remove('hidden');
+    // force-open the <details> panel so user immediately sees the raw text
+    const det = els.ocrRaw.querySelector('details');
+    if (det) det.open = true;
 
-    fillFormFromRaw();
+    const filled = fillFormFromRaw();
+    const totalChars = (rawText.front || '').length + (rawText.back || '').length + (rawText.cv || '').length;
 
-    els.ocrStatus.className = 'status success';
-    els.ocrStatus.textContent = '✓ خلصنا — راجع الفورم تحت وعدّل اللي محتاج تعديل قبل ما تضيف للشيت.';
+    if (filled.length === 0) {
+      els.ocrStatus.className = 'status error';
+      els.ocrStatus.textContent = totalChars < 30
+        ? '⚠ قراءة الصور طلعت فاضية أو شبه فاضية. جرّب صورة أوضح، أو اكتب البيانات يدوي.'
+        : `⚠ قرينا ${totalChars} حرف بس مقدرناش نطلّع منهم بيانات منظمة. شوف "النص الخام" تحت — اضغط على أي سطر عشان تحطه في حقل.`;
+    } else {
+      els.ocrStatus.className = 'status success';
+      els.ocrStatus.textContent = `✓ تم تعبئة ${filled.length} حقل تلقائياً: ${filled.join('، ')}. راجع الباقي وعدّل اللي محتاج.`;
+    }
   } catch (err) {
     console.error(err);
     els.ocrStatus.className = 'status error';
@@ -380,38 +391,121 @@ async function runExtraction() {
 }
 
 function fillFormFromRaw() {
+  const filled = [];
+  const set = (el, val, label) => {
+    if (val && !el.value) { el.value = val; filled.push(label); return true; }
+    return false;
+  };
+
   // 1. National ID — try back first (clearer area), then front
   const nid = find14DigitId(rawText.back) || find14DigitId(rawText.front);
   if (nid && !els.fNid.value) {
     els.fNid.value = nid;
     onNidChange();
+    filled.push('الرقم القومي');
+    if (els.fDob.value) filled.push('تاريخ الميلاد');
+    if (els.fGender.value) filled.push('النوع');
+    if (els.fGov.value) filled.push('المحافظة');
   }
   // 2. Religion (back)
-  const rel = findReligion(rawText.back);
-  if (rel && !els.fReligion.value) els.fReligion.value = rel;
+  set(els.fReligion, findReligion(rawText.back), 'الديانة');
   // 3. Expiry (back) — latest year date
   const backDates = findDatesIso(rawText.back).sort();
-  if (backDates.length && !els.fExpiry.value) {
-    els.fExpiry.value = backDates[backDates.length - 1];
-  }
+  if (backDates.length) set(els.fExpiry, backDates[backDates.length - 1], 'الانتهاء');
   // 4. Address (front)
-  const addr = findArabicAddressLine(rawText.front);
-  if (addr && !els.fAddress.value) els.fAddress.value = addr;
-  // 5. Arabic name (front) — concat top 2 candidates if they look like first + rest
+  set(els.fAddress, findArabicAddressLine(rawText.front), 'العنوان');
+  // 5. Arabic name (front)
   const arNames = findArabicNameLines(rawText.front);
-  if (arNames.length && !els.fNameAr.value) {
-    // Often the first 2 lines of an ID name area = first name + remaining names
-    els.fNameAr.value = arNames.slice(0, 2).join(' ').replace(/\s+/g, ' ').trim();
+  if (arNames.length) {
+    set(els.fNameAr, arNames.slice(0, 2).join(' ').replace(/\s+/g, ' ').trim(), 'الاسم بالعربي');
   }
   // 6. CV: english name, email, phone
   if (rawText.cv) {
-    if (!els.fNameEn.value) els.fNameEn.value = findEnglishName(rawText.cv);
-    if (!els.fEmail.value)  els.fEmail.value  = findEmail(rawText.cv);
-    if (!els.fPhone.value)  els.fPhone.value  = findPhone(rawText.cv);
+    set(els.fNameEn, findEnglishName(rawText.cv), 'الاسم بالإنجليزي');
+    set(els.fEmail,  findEmail(rawText.cv),       'الإيميل');
+    set(els.fPhone,  findPhone(rawText.cv),       'التليفون');
   }
+  return filled;
 }
 
 els.btnExtract.addEventListener('click', runExtraction);
+
+// ───────── click-to-fill from raw text ─────────
+// Each non-empty line in the raw panels becomes clickable;
+// clicking opens a tiny picker offering all form fields.
+const FIELD_PICKER = [
+  { key: 'fNameAr',  label: 'الاسم بالعربي' },
+  { key: 'fNameEn',  label: 'الاسم بالإنجليزي' },
+  { key: 'fNid',     label: 'الرقم القومي (يمسح كل اللي مش رقم)' },
+  { key: 'fAddress', label: 'العنوان' },
+  { key: 'fEmail',   label: 'الإيميل' },
+  { key: 'fPhone',   label: 'التليفون (يمسح كل اللي مش رقم)' },
+];
+
+function renderRawText(targetKey, text) {
+  const el = els[targetKey];
+  el.innerHTML = '';
+  if (!text || !text.trim()) {
+    el.textContent = '—';
+    return;
+  }
+  // build clickable lines
+  const lines = text.split(/\r?\n/);
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      el.appendChild(document.createTextNode('\n'));
+      return;
+    }
+    const span = document.createElement('span');
+    span.className = 'raw-line';
+    span.textContent = line;
+    span.title = 'اضغط لتعبئة حقل بالنص ده';
+    span.addEventListener('click', () => openFieldPicker(span, trimmed));
+    el.appendChild(span);
+  });
+}
+
+function openFieldPicker(anchor, text) {
+  // remove any existing picker
+  document.querySelectorAll('.field-picker').forEach(p => p.remove());
+  const picker = document.createElement('div');
+  picker.className = 'field-picker';
+  picker.innerHTML = `
+    <div class="field-picker-head">حط النص في:</div>
+    ${FIELD_PICKER.map(f => `<button type="button" data-key="${f.key}">${f.label}</button>`).join('')}
+    <button type="button" class="cancel">إلغاء</button>
+  `;
+  document.body.appendChild(picker);
+  const r = anchor.getBoundingClientRect();
+  picker.style.top  = (window.scrollY + r.bottom + 4) + 'px';
+  picker.style.left = (window.scrollX + r.left) + 'px';
+  picker.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-key]');
+    if (btn) {
+      const targetEl = els[btn.dataset.key];
+      if (btn.dataset.key === 'fNid') {
+        const digits = normalizeDigits(text).replace(/\D/g, '').slice(0, 14);
+        targetEl.value = digits;
+        onNidChange();
+      } else if (btn.dataset.key === 'fPhone') {
+        targetEl.value = normalizeDigits(text).replace(/\D/g, '');
+      } else {
+        targetEl.value = text;
+      }
+      targetEl.focus();
+      picker.remove();
+    } else if (e.target.classList.contains('cancel')) {
+      picker.remove();
+    }
+  });
+  setTimeout(() => {
+    const closer = (ev) => {
+      if (!picker.contains(ev.target)) { picker.remove(); document.removeEventListener('click', closer); }
+    };
+    document.addEventListener('click', closer);
+  }, 0);
+}
 
 // ───────── NID live derive ─────────
 function onNidChange() {

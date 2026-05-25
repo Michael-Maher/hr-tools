@@ -252,11 +252,71 @@ main {
   font-family: 'Cairo', monospace;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
+  max-height: 280px;
   overflow: auto;
   direction: rtl;
   text-align: right;
   min-height: 60px;
+}
+.raw-line {
+  display: block;
+  padding: 2px 4px;
+  margin: 1px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background .12s;
+}
+.raw-line:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+  outline: 1px solid var(--primary);
+}
+
+/* floating field-picker popup */
+.field-picker {
+  position: absolute;
+  z-index: 9999;
+  background: #fff;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-lg);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+  max-width: 320px;
+}
+.field-picker-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.field-picker button {
+  text-align: right;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  color: var(--text);
+}
+.field-picker button:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.field-picker button.cancel {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--muted);
+  text-align: center;
+  font-size: 12px;
 }
 
 /* ─── form ─── */
