@@ -143,14 +143,31 @@ function hoursToExcelTime(h) {
 // Parse an Excel cell representing a time/duration (HH:MM) into hours (decimal).
 // Prefer the formatted display string `w` (e.g. "16:30", "24:00", "2:30") — it's the
 // most reliable representation and avoids timezone issues with Date objects.
+//
+// Tolerates bare-integer time entry (HR-spec common errors):
+//   "0"   → 0 (midnight)         "8"   → 8 (08:00)
+//   "16"  → 16 (16:00)           "24"  → 24 (end-of-day)
+// Excel time-fraction cells (v < 1) are still treated as fractions of a day.
 function cellToHours(cell) {
   if (cell == null) return null;
   if (typeof cell === 'object') {
     if (cell.w) {
-      const m = String(cell.w).trim().match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
+      const w = String(cell.w).trim();
+      const m = w.match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
       if (m) return +m[1] + (+m[2]) / 60 + (m[3] ? +m[3] / 3600 : 0);
+      // bare integer like "8" or "5" → hour-of-day
+      const bm = w.match(/^(\d{1,2})$/);
+      if (bm) {
+        const n = +bm[1];
+        if (n >= 0 && n <= 24) return n;
+      }
     }
-    if (typeof cell.v === 'number') return cell.v * 24;
+    if (typeof cell.v === 'number') {
+      const v = cell.v;
+      // Bare integer typed by user (no time formatting) → hour-of-day
+      if (Number.isInteger(v) && v >= 0 && v <= 24) return v;
+      return v * 24; // Excel time fraction
+    }
     if (cell.v instanceof Date) {
       const ep = Date.UTC(1899, 11, 30);
       const ms = cell.v.getTime() - ep;
@@ -158,12 +175,37 @@ function cellToHours(cell) {
       return fracDay * 24;
     }
   }
-  if (typeof cell === 'number') return cell * 24;
+  if (typeof cell === 'number') {
+    if (Number.isInteger(cell) && cell >= 0 && cell <= 24) return cell;
+    return cell * 24;
+  }
   if (typeof cell === 'string') {
-    const m = cell.trim().match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
+    const s = cell.trim();
+    const m = s.match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
     if (m) return +m[1] + (+m[2]) / 60 + (m[3] ? +m[3] / 3600 : 0);
+    const bm = s.match(/^(\d{1,2})$/);
+    if (bm) {
+      const n = +bm[1];
+      if (n >= 0 && n <= 24) return n;
+    }
   }
   return null;
+}
+
+// Adjust a shift's end time to make sense given the start.
+// Handles three common human-input patterns:
+//   - to = 0 (or near 0) with positive from  → midnight end-of-day (to = 24)
+//   - from > to, BOTH ≤ 12                   → "AM/PM omitted" (e.g. "8 to 5" = 8 AM → 5 PM)
+//   - from > to, larger gap                  → overnight shift (e.g. 22 → 6)
+function normalizeShiftEnd(from, to) {
+  if (from == null || to == null) return to;
+  if (to <= 0.01 && from > 0.01) return 24;
+  if (to < from && from > 0.01) {
+    // PM omitted vs overnight — disambiguate by magnitude
+    if (from <= 12 && to <= 12) return to + 12; // "8 to 5" = 8 AM → 5 PM
+    return to + 24;                              // genuine overnight
+  }
+  return to;
 }
 
 const MONTHS = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11 };
@@ -237,11 +279,11 @@ function calculateRow(parsed) {
 
   if (parsed.from == null || parsed.to == null) return out;
   const from = parsed.from;
-  // Excel often stores end-of-day midnight as 0:00 (a `time(0,0)` cell). When that's
-  // followed by a positive From, interpret the 0 as 24:00 so a normal 8:00 → 0:00
-  // shift parses as a full sahar (16h gross, 7:30 OT) instead of returning early.
-  let to = parsed.to;
-  if (to < from && from > 0.01) to += 24;
+  // Normalise the shift end:
+  //   - to=0 with positive from   → 24 (end-of-day midnight, sahar)
+  //   - from > to, both ≤ 12      → "AM/PM omitted" (e.g. "8 to 5" = 8 AM → 5 PM)
+  //   - from > to, larger gap     → overnight shift
+  let to = normalizeShiftEnd(from, parsed.to);
   const work = to - from;
   if (work <= 0) return out;
 
@@ -251,6 +293,11 @@ function calculateRow(parsed) {
   // Per-person OT start override (e.g. Ahmed Ayman in Finance → 17:00)
   const otStart = getPersonOtStart(parsed.name, dept) ?? s.shiftEnd;
 
+  // Friday lateness rule: late by > 1h on Friday → no 2-day credit (OT still counted)
+  // Continuation rows (from=0) are excluded — they're a morning, not a late arrival.
+  const fridayLateThreshold = s.shiftStart + 1.0;
+  const isFridayLate = isFriday && !isContinuation && from > fridayLateThreshold + 0.01;
+
   // ── Day credits ─────────────────────────────────────────────────────────
   // Fri/Sat need worked × 1.5 ≥ 8. Holidays only credit workers (staff get alt day off).
   // When a holiday falls on Fri/Sat, take the MAX credit (holiday's 2 vs Sat's 1).
@@ -258,12 +305,13 @@ function calculateRow(parsed) {
   const friSatGate = work * 1.5 >= 8;
   const holidayGate = isContinuation || work >= minDayCreditHours;
   let credit = 0;
-  if (isFriday && friSatGate) credit = Math.max(credit, s.fridayDays);
+  if (isFriday && friSatGate && !isFridayLate) credit = Math.max(credit, s.fridayDays);
   if (isSaturday && friSatGate) credit = Math.max(credit, s.saturdayDays);
   if (holiday && holidayGate && !isContinuation && role === 'worker') {
     credit = Math.max(credit, holiday.days);
   }
   out.clarification = credit;
+  if (isFridayLate) out.fridayLate = true;
 
   // ── Transportation: drivers receive max(0, total − 15) as OT, no sahar split ──
   if (dept.driverBonus) {
@@ -379,12 +427,11 @@ function computeEmployeeTotals(e) {
     if (!c) continue;
     approved += c.approved;
     clarification += c.clarification;
-    // Real work occurs when there's a non-negative duration; account for the To=0
-    // (=24) wrap so 8:00 → 0:00 counts as worked.
+    // Real work occurs when there's a non-negative duration; reuse the same
+    // shift-end normalisation as calculateRow so "8 to 5", "8 to 0", etc. count.
     let workSpan = 0;
     if (d.from != null && d.to != null) {
-      let tt = d.to;
-      if (tt < d.from && d.from > 0.01) tt += 24;
+      const tt = normalizeShiftEnd(d.from, d.to);
       workSpan = tt - d.from;
     }
     if (workSpan > 0) daysWorked++;
@@ -582,7 +629,12 @@ function renderPreview() {
       let tag = '';
       let rowClass = '';
       if (calc.kind === 'holiday') { tag = '<span class="tag tag-hol">عيد رسمي</span>'; rowClass = 'holiday'; }
-      else if (calc.kind === 'friday') { tag = '<span class="tag tag-fri">جمعة</span>'; rowClass = 'friday'; }
+      else if (calc.kind === 'friday') {
+        tag = calc.fridayLate
+          ? '<span class="tag tag-fri">جمعة (متأخر)</span>'
+          : '<span class="tag tag-fri">جمعة</span>';
+        rowClass = 'friday';
+      }
       else if (calc.kind === 'saturday') { tag = '<span class="tag tag-sat">سبت</span>'; rowClass = 'saturday'; }
       else if (calc.kind === 'sahar') { tag = '<span class="tag tag-sahar">سهر</span>'; rowClass = 'sahar'; }
       else if (calc.kind === 'continuation') { tag = '<span class="tag tag-sahar">امتداد</span>'; }
