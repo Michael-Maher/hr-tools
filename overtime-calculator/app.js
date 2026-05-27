@@ -294,9 +294,10 @@ function calculateRow(parsed) {
   const otStart = getPersonOtStart(parsed.name, dept) ?? s.shiftEnd;
 
   // Friday lateness rule: late by > 1h on Friday → no 2-day credit (OT still counted)
-  // Continuation rows (from=0) are excluded — they're a morning, not a late arrival.
+  // Only applies to MORNING shifts (from ≤ 12) — night-shift workers starting in
+  // the evening aren't "late to the day shift". Continuation rows excluded too.
   const fridayLateThreshold = s.shiftStart + 1.0;
-  const isFridayLate = isFriday && !isContinuation && from > fridayLateThreshold + 0.01;
+  const isFridayLate = isFriday && !isContinuation && from <= 12 && from > fridayLateThreshold + 0.0001;
 
   // ── Day credits ─────────────────────────────────────────────────────────
   // Fri/Sat need worked × 1.5 ≥ 8. Holidays only credit workers (staff get alt day off).
@@ -349,8 +350,38 @@ function calculateRow(parsed) {
     return out;
   }
 
-  // 2. Sahar shift — full evening to midnight. Counts as 7:30 OT in Approved
-  //    (matches confirmed files across Security, QC, Production, R&D, QA).
+  // 2.5. Fri (on-time) + Holiday non-continuation: full-day OT formula
+  //      Per spec "Simplified Overtime Calculations":
+  //        08:00 → 16:30 = 8 OT      (entire morning counts on off-days)
+  //        16:30 → 24:00 = 7.5 OT    (sahar segment, break already excluded)
+  //        08:00 → 00:00 = 15.5 OT   (= 8 + 7.5, full day to midnight)
+  //      Saturday is excluded — spec only specifies day-credit handling for Sat,
+  //      so the post-16:30 OT formula is kept (matches confirmed HR files).
+  //      Both worker AND staff get full-day OT on holidays (only the day CREDIT
+  //      differs by role — they still worked the hours).
+  const isFridayOnTime = isFriday && !isFridayLate;
+  if (!isContinuation && (isFridayOnTime || !!holiday)) {
+    let approved;
+    if (from <= 12 + 0.001) {
+      // Morning start → whole shift is OT (minus break), capped at 15:30
+      out.kind = isFriday ? 'friday' : 'holiday';
+      approved = Math.min(s.continuationCap, work - breakHours);
+    } else if (endsAtMidnight) {
+      // Evening-only sahar start → spec sahar value (no break deduction)
+      out.kind = 'sahar';
+      approved = s.sahar.total;
+    } else {
+      // Afternoon shift not reaching midnight → regular post-otStart OT
+      out.kind = isFriday ? 'friday' : 'holiday';
+      approved = Math.max(0, to - otStart);
+    }
+    if (approved < s.minOtHours) approved = 0;
+    out.approved = approved;
+    return out;
+  }
+
+  // 3. Sahar shift (regular weekdays + Saturday) — full evening to midnight.
+  //    Counts as 7:30 OT in Approved (matches confirmed HR files).
   //    The chain pass will redistribute when a continuation morning follows.
   if (endsAtMidnight) {
     out.kind = 'sahar';
@@ -358,7 +389,7 @@ function calculateRow(parsed) {
     return out;
   }
 
-  // 3. Regular OT — past otStart (default 16:30, or 17:00 for some Finance staff)
+  // 4. Regular OT — past otStart (default 16:30, or 17:00 for some Finance staff)
   if (isFriday) out.kind = 'friday';
   else if (isSaturday) out.kind = 'saturday';
   else if (holiday) out.kind = 'holiday';
