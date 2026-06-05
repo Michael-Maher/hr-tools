@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
   <meta name="theme-color" content="#4338ca">
   <title>حاسبة الأوفر تايم</title>
+  <link rel="manifest" href="../manifest.webmanifest">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HR Tools">
+  <link rel="apple-touch-icon" href="../icons/apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -128,7 +134,8 @@
     <div id="batch-mode" class="hidden">
       <section class="card">
         <h2><span class="step">1</span>ملفات الأقسام</h2>
-        <p class="hint-block">ارفع شيت كل قسم واختار اسم القسم الصحيح. تقدر تضيف لحد ١٦ قسم. كل قسم له زر تنزيل خاص بعد الحساب.</p>
+        <p class="hint-block">ارفع شيت كل قسم واختار اسم القسم الصحيح. تقدر تضيف لحد ١٦ قسم. كل قسم له زر تنزيل خاص بعد الحساب.<br>
+        مفتاح <strong>«احسب OT»</strong> شغّال افتراضياً. لو القسم محسوب يدويًا قفله — ساعتها هناخد نتايج الشيت (Approved / Clarification) زي ما هي ونحطها في شيت المصنع من غير إعادة حساب.</p>
         <div id="batch-depts"></div>
         <button class="btn btn-secondary" id="btn-add-dept" type="button">+ إضافة قسم جديد</button>
       </section>
@@ -167,5 +174,6 @@
 
   <script src="holidays.js?v=20260527b"></script>
   <script src="app.js?v=20260527b"></script>
+  <script src="../pwa.js"></script>
 </body>
 </html>

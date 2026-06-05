@@ -1037,6 +1037,8 @@ function addDeptSlot() {
     employees: [],
     processed: false,
     error: null,
+    calculate: true,   // when false → sheet is already calculated; use its existing
+                       // Approved/Clarification values as-is (no recompute)
   });
 }
 
@@ -1045,7 +1047,8 @@ function renderBatchDepts() {
   wrap.innerHTML = '';
   batch.depts.forEach((slot, i) => {
     const div = document.createElement('div');
-    div.className = 'dept-slot' + (slot.processed ? ' processed' : '') + (slot.error ? ' error' : '');
+    div.className = 'dept-slot' + (slot.processed ? ' processed' : '') + (slot.error ? ' error' : '')
+      + (slot.calculate ? '' : ' no-calc');
     div.dataset.slotId = slot.slotId;
     const deptOptions = '<option value="">— اختر القسم —</option>' + DEPARTMENTS.map(d =>
       `<option value="${d.key}" ${d.key === slot.deptKey ? 'selected' : ''}>${d.label}</option>`
@@ -1055,15 +1058,24 @@ function renderBatchDepts() {
       : '<span class="fname empty">لم يتم رفع ملف</span>';
     let meta = '';
     if (slot.error) meta = `<span class="meta">⚠ ${slot.error}</span>`;
-    else if (slot.processed) meta = `<span class="meta">✓ ${slot.employees.length} موظف</span>`;
-    else if (slot.bytes) meta = `<span class="meta">جاهز للحساب</span>`;
+    else if (slot.processed) meta = `<span class="meta">✓ ${slot.employees.length} موظف${slot.calculate ? '' : ' (بدون حساب)'}</span>`;
+    else if (slot.bytes) meta = `<span class="meta">${slot.calculate ? 'جاهز للحساب' : 'جاهز — هيتنقل كما هو'}</span>`;
+    // Toggle: ON = calculate OT from raw data, OFF = use the sheet's existing
+    // Approved/Clarification values as-is and just push them to the overall sheet.
+    const toggle = `
+      <label class="ot-toggle" title="${slot.calculate ? 'هيحسب الأوفر تايم من الداتا' : 'هيستخدم نتايج الشيت زي ما هي'}">
+        <input type="checkbox" data-action="calc-toggle" ${slot.calculate ? 'checked' : ''}>
+        <span class="ot-toggle-track"><span class="ot-toggle-thumb"></span></span>
+        <span class="ot-toggle-lbl">${slot.calculate ? 'احسب OT' : 'محسوب يدويًا'}</span>
+      </label>`;
     div.innerHTML = `
       <div class="dept-slot-num">${i + 1}</div>
-      <select data-action="dept">${deptOptions}</select>
+      <select data-action="dept"${slot.calculate ? '' : ' disabled'}>${deptOptions}</select>
       <div class="dept-slot-file">
         <label>📂 رفع/تغيير<input type="file" accept=".xlsx" data-action="upload"></label>
         ${fname}
       </div>
+      ${toggle}
       ${meta}
       <div class="dept-slot-actions">
         ${slot.processed ? '<button class="btn btn-success btn-sm" data-action="download">⬇</button>' : ''}
@@ -1073,6 +1085,14 @@ function renderBatchDepts() {
     div.querySelector('[data-action="dept"]').addEventListener('change', (e) => {
       slot.deptKey = e.target.value;
       slot.processed = false;  // dept change invalidates prior calc
+      slot.employees = [];
+      slot.error = null;
+      renderBatchDepts();
+      updateBatchProcessButton();
+    });
+    div.querySelector('[data-action="calc-toggle"]').addEventListener('change', (e) => {
+      slot.calculate = e.target.checked;
+      slot.processed = false;   // mode change invalidates prior result
       slot.employees = [];
       slot.error = null;
       renderBatchDepts();
@@ -1139,7 +1159,7 @@ function loadOverallFile(file) {
 }
 
 function updateBatchProcessButton() {
-  const hasReadyDept = batch.depts.some(s => s.bytes && s.deptKey);
+  const hasReadyDept = batch.depts.some(s => s.bytes && (s.calculate ? s.deptKey : true));
   const hasOverall = batch.overall && batch.overall.bytes;
   document.getElementById('btn-batch-process').disabled = !(hasReadyDept && hasOverall);
 }
@@ -1154,12 +1174,18 @@ async function batchProcessAll() {
     const savedDept = state.settings.department;
     for (const slot of batch.depts) {
       if (!slot.bytes) continue;
-      if (!slot.deptKey) { slot.error = 'لم يتم اختيار القسم'; slot.processed = false; continue; }
+      if (slot.calculate && !slot.deptKey) { slot.error = 'لم يتم اختيار القسم'; slot.processed = false; continue; }
       try {
-        state.settings.department = slot.deptKey;
         const data = new Uint8Array(slot.bytes.slice(0));
         const wb = XLSX.read(data, { type: 'array', cellDates: true });
-        const employees = processWorkbookFor(wb);
+        let employees;
+        if (slot.calculate) {
+          state.settings.department = slot.deptKey;
+          employees = processWorkbookFor(wb);
+        } else {
+          // Manually-calculated sheet — keep its existing results untouched.
+          employees = processWorkbookPassthrough(wb);
+        }
         slot.employees = employees;
         slot.processed = true;
         slot.error = null;
@@ -1237,6 +1263,64 @@ function processWorkbookFor(wb) {
   for (const e of employees) {
     for (const d of e.days) d.calc = calculateRow(d);
     linkContinuationChains(e);
+    e.totals = computeEmployeeTotals(e);
+  }
+  return employees;
+}
+
+// Parse a sheet that was ALREADY calculated by hand. Instead of recomputing OT,
+// we read the existing Approved Days (col H) and Clarification (col I) values
+// straight from the sheet and surface them as each row's calc — so the overall
+// factory sheet receives the manual numbers unchanged.
+function processWorkbookPassthrough(wb) {
+  const sheetName = wb.SheetNames[0];
+  const ws = wb.Sheets[sheetName];
+  const rows = parseSheet(ws);
+  const cv = (c) => (c && typeof c === 'object' && 'v' in c) ? c.v : c;
+  // Clarification holds a plain day-count integer (1, 2, 3) — read it as a number,
+  // not via cellToHours (which would misread larger counts as a time-of-day).
+  const numVal = (c) => {
+    const v = cv(c);
+    if (typeof v === 'number') return v;
+    const n = parseFloat(String(v ?? '').trim());
+    return isNaN(n) ? 0 : n;
+  };
+  const employees = [];
+  let cur = null;
+  for (let i = 6; i < rows.length; i++) {
+    const r = rows[i];
+    const dayVal = cv(r[0]);
+    const idVal = cv(r[2]);
+    const nameVal = cv(r[3]);
+    if (dayVal == null && idVal == null && nameVal == null) continue;
+    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
+      if (cur) { cur.totalRowIndex = i; employees.push(cur); cur = null; }
+      continue;
+    }
+    if (idVal == null || nameVal == null) continue;
+    if (!cur || cur.id !== idVal) {
+      if (cur) employees.push(cur);
+      cur = { id: idVal, name: String(nameVal).trim(), days: [], firstRowIndex: i };
+    }
+    cur.days.push({
+      rowIndex: i,
+      day: dayVal,
+      date: cellToDate(r[1]),
+      id: idVal,
+      name: String(nameVal).trim(),
+      from: cellToHours(r[4]),
+      to: cellToHours(r[5]),
+      hours: cellToHours(r[6]),
+      calc: {
+        approved: cellToHours(r[7]) || 0,   // existing Approved Days (time)
+        clarification: numVal(r[8]),         // existing Clarification (day count)
+        kind: 'passthrough',
+        role: 'worker',
+      },
+    });
+  }
+  if (cur) employees.push(cur);
+  for (const e of employees) {
     e.totals = computeEmployeeTotals(e);
   }
   return employees;

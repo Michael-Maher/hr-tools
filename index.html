@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#4338ca">
   <title>HR Tools</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HR Tools">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -24,12 +30,17 @@
     .tool p{font-size:13.5px;color:#64748b;line-height:1.6}
     .tool .arrow{margin-top:14px;color:#4f46e5;font-size:13px;font-weight:600}
     footer{text-align:center;color:#64748b;font-size:12px;padding:24px;border-top:1px solid #e2e8f0}
+    #pwa-install{margin-top:18px;display:inline-flex;align-items:center;gap:8px;background:#fff;color:#4338ca;border:0;border-radius:99px;padding:11px 22px;font-family:inherit;font-size:14.5px;font-weight:700;cursor:pointer;box-shadow:0 6px 18px rgba(15,23,42,.18);transition:transform .15s}
+    #pwa-install:hover{transform:translateY(-1px)}
+    .pwa-ios-hint{max-width:560px;margin:14px auto 0;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 18px;color:#334155;font-size:13.5px;line-height:1.8}
+    .pwa-ios-hint b{color:#4338ca}
   </style>
 </head>
 <body>
   <header>
     <h1>HR Tools</h1>
     <p>أدوات بسيطة وسريعة لإدارة شئون الموظفين</p>
+    <button id="pwa-install" type="button" hidden>⬇ ثبّت التطبيق على جهازك</button>
   </header>
   <main>
     <div class="grid">
@@ -52,6 +63,9 @@
         <div class="arrow">افتح الأداة ←</div>
       </a>
     </div>
+    <div id="pwa-ios-hint" class="pwa-ios-hint" hidden>
+      📲 عشان تثبّت التطبيق على الآيفون: اضغط زر <b>المشاركة</b> في Safari، ثم اختار <b>«إضافة إلى الشاشة الرئيسية»</b>.
+    </div>
   </main>
   <footer>
     HR Tools · Michael Maher
@@ -61,5 +75,6 @@
       <span style="font-size:14px">&#10084;&#65039;</span>
     </div>
   </footer>
+  <script src="pwa.js"></script>
 </body>
 </html>

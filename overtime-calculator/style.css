@@ -421,7 +421,7 @@ main {
 }
 .dept-slot {
   display: grid;
-  grid-template-columns: 32px 1fr 1.4fr auto auto;
+  grid-template-columns: 32px 1fr 1.4fr auto auto auto;
   gap: 10px;
   align-items: center;
   background: var(--bg-2);
@@ -432,6 +432,47 @@ main {
 }
 .dept-slot.processed { background: linear-gradient(135deg, #dcfce7, #ecfccb); border-color: #86efac; }
 .dept-slot.error { background: var(--danger-soft); border-color: #fecaca; }
+.dept-slot.no-calc { background: linear-gradient(135deg, #fff7ed, #fffbeb); border-color: #fcd34d; }
+.dept-slot.no-calc.processed { background: linear-gradient(135deg, #dcfce7, #ecfccb); border-color: #86efac; }
+.dept-slot select[disabled] { opacity: .5; background: #f1f5f9; cursor: not-allowed; }
+
+/* per-sheet "calculate OT?" switch */
+.ot-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.ot-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.ot-toggle-track {
+  position: relative;
+  width: 38px;
+  height: 21px;
+  background: #cbd5e1;
+  border-radius: 99px;
+  transition: background .15s;
+  flex-shrink: 0;
+}
+.ot-toggle-thumb {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 17px; height: 17px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(15,23,42,.25);
+  transition: transform .15s;
+}
+.ot-toggle input:checked + .ot-toggle-track { background: var(--primary); }
+.ot-toggle input:checked + .ot-toggle-track .ot-toggle-thumb { transform: translateX(17px); }
+.ot-toggle-lbl {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--primary-hover);
+}
+.dept-slot.no-calc .ot-toggle-lbl { color: #b45309; }
+.ot-toggle input:focus-visible + .ot-toggle-track { outline: 2px solid var(--primary); outline-offset: 2px; }
 .dept-slot-num {
   font-size: 13px;
   font-weight: 700;
@@ -557,11 +598,12 @@ main {
 @media (max-width: 640px) {
   .mode-bar { grid-template-columns: 1fr; }
   .mode-btn { padding: 12px 14px; }
-  .dept-slot { grid-template-columns: 28px 1fr auto; grid-template-rows: auto auto; gap: 8px; }
-  .dept-slot-num { grid-row: 1 / 3; }
+  .dept-slot { grid-template-columns: 28px 1fr auto; grid-template-rows: auto auto auto; gap: 8px; }
+  .dept-slot-num { grid-row: 1 / 4; }
   .dept-slot select { grid-column: 2; }
   .dept-slot .meta, .dept-slot-actions { grid-column: 3; justify-self: end; }
   .dept-slot-file { grid-column: 2 / -1; }
+  .ot-toggle { grid-column: 2 / -1; justify-self: start; }
 }
 
 /* ─────── department info panel ─────── */
