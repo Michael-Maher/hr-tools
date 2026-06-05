@@ -93,6 +93,17 @@ header p {
   position: relative;
   max-width: 780px;
 }
+.header-logo {
+  width: 72px;
+  height: auto;
+  background: #fff;
+  border-radius: 18px;
+  padding: 7px;
+  box-shadow: 0 6px 22px rgba(0,0,0,.22);
+  display: block;
+  margin: 0 auto 14px;
+  position: relative;
+}
 
 main {
   max-width: 1320px;
