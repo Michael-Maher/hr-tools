@@ -51,9 +51,17 @@ let state = {
 // =============================================================================
 // Each dept declares a default role (worker/staff) plus per-name exceptions.
 // Special rules:
-//   - driverBonus:    OT computed as max(0, total_hours − 15) — replaces normal OT
+//   - driverBonus:    Transportation drivers. OT = driverDailyBonus + max(0, To − driverOtStart)
+//                     on EVERY worked day (incl. Fri/Sat/holiday). Drivers' OT starts at 17:00
+//                     and they always get the flat daily bonus because they leave early / return
+//                     late. e.g. 6:00→17:00 = 2, 6:00→19:00 = 4, 6:00→24:00 = 2+7 = 9.
+//   - nightShiftFlat: Security. ANY shift ending at midnight (a "night shift") = this many OT
+//                     hours (7.5), regardless of day — overrides the Fri/holiday full-day formula.
+//                     Non-midnight shifts fall back to regular post-16:30 OT.
 //   - personOtStart:  { 'Name': 17.0 } — override the OT-start hour for that person
 //   - exemptNames:    these employees never receive OT or day credits
+//   - otRowNumber:    write per-row Approved as a plain number (e.g. "2"), not a time ("2:00")
+//   - otTotalNumber:  write the employee Total's Approved as a plain decimal number (e.g. "97.5")
 //
 // Role consequences:
 //   - worker → holiday work earns the configured day credit (2 days)
@@ -61,8 +69,8 @@ let state = {
 //   - exempt → row produces zeros (no OT, no credit, no sahar)
 // =============================================================================
 const DEPARTMENTS = [
-  { key: 'Transportation',   label: 'Transportation',   defaultRole: 'worker', driverBonus: true },
-  { key: 'Security',         label: 'Security',         defaultRole: 'worker', staffNames: ['Tamer'] },
+  { key: 'Transportation',   label: 'Transportation',   defaultRole: 'worker', driverBonus: true, driverOtStart: 17.0, driverDailyBonus: 2, otRowNumber: true, otTotalNumber: true },
+  { key: 'Security',         label: 'Security',         defaultRole: 'worker', staffNames: ['Tamer'], nightShiftFlat: 7.5, otTotalNumber: true },
   { key: 'Finance',          label: 'Finance',          defaultRole: 'staff',  personOtStart: { 'Ahmed Ayman': 17.0 } },
   { key: 'Warehouses',       label: 'Warehouses',       defaultRole: 'worker', exemptNames: ['Khaled Amer', 'Safwat', 'Ayman'] },
   { key: 'Warehouses Sawah', label: 'Warehouses Sawah', defaultRole: 'worker', exemptNames: ['Khaled Amer', 'Safwat', 'Ayman'] },
@@ -133,6 +141,15 @@ function hoursToHHMM(h) {
   const mm = Math.round((h - hh) * 60);
   if (mm === 60) return `${sign}${pad(hh + 1)}:00`;
   return `${sign}${pad(hh)}:${pad(mm)}`;
+}
+// Display an Approved value (decimal hours) the same way the export will write it:
+// as a plain number for number-format departments, otherwise as a time. `asNumber`
+// is decided by the caller (row vs total can differ — Security writes time rows but
+// a number total).
+function fmtApproved(h, asNumber) {
+  if (h == null || isNaN(h) || h === 0) return '';
+  if (asNumber) return String(Math.round(h * 100) / 100);
+  return hoursToHHMM(h);
 }
 function hoursToExcelTime(h) {
   // Excel time = fraction of day
@@ -314,15 +331,19 @@ function calculateRow(parsed) {
   out.clarification = credit;
   if (isFridayLate) out.fridayLate = true;
 
-  // ── Transportation: drivers receive max(0, total − 15) as OT, no sahar split ──
+  // ── Transportation: drivers get a flat daily bonus + any OT past their 17:00 start ──
+  // OT = driverDailyBonus + max(0, To − driverOtStart), applied on EVERY worked day
+  // (incl. Fri/Sat/holiday). The flat bonus is always paid because drivers leave home
+  // early and return late. Examples: 6:00→17:00 = 2, 6:00→19:00 = 4, 6:00→24:00 = 9.
   if (dept.driverBonus) {
     if (isFriday) out.kind = 'friday';
     else if (isSaturday) out.kind = 'saturday';
     else if (holiday) out.kind = 'holiday';
     else if (isContinuation) out.kind = 'continuation';
     else out.kind = 'regular';
-    const driverOt = Math.max(0, work - 15);
-    if (driverOt >= s.minOtHours) out.approved = driverOt;
+    const driverOtStart = dept.driverOtStart ?? 17.0;
+    const driverDailyBonus = dept.driverDailyBonus ?? 2;
+    out.approved = driverDailyBonus + Math.max(0, to - driverOtStart);
     return out;
   }
 
@@ -347,6 +368,25 @@ function calculateRow(parsed) {
     }
     if (approved < s.minOtHours) approved = 0;
     out.approved = approved;
+    return out;
+  }
+
+  // 2.4. Security (nightShiftFlat): ANY shift ending at midnight is a "night shift"
+  //      worth a flat 7:30 OT on every day — including on-time Fridays and holidays,
+  //      which would otherwise hit the full-day formula below and wrongly pay 15:30.
+  //      Non-midnight shifts fall through to regular post-16:30 OT (e.g. 16:30→19:00 =
+  //      2:30, Sat 8:00→19:00 = 2:30). Day credits (set above) are unaffected.
+  if (dept.nightShiftFlat != null) {
+    if (endsAtMidnight) {
+      out.kind = 'sahar';
+      out.approved = dept.nightShiftFlat;
+    } else {
+      if (isFriday) out.kind = 'friday';
+      else if (isSaturday) out.kind = 'saturday';
+      else if (holiday) out.kind = 'holiday';
+      const ot = Math.max(0, to - otStart);
+      if (ot >= s.minOtHours) out.approved = ot;
+    }
     return out;
   }
 
@@ -595,10 +635,12 @@ function renderSummary() {
   }
   const grid = document.getElementById('summary-grid');
   const empLabel = filterId ? 'الموظف المعروض' : 'عدد الموظفين';
+  const sumDept = getDeptConfig();
+  const sumAsNumber = !!(sumDept && (sumDept.otTotalNumber || sumDept.otRowNumber));
   grid.innerHTML = `
     <div class="summary-card"><div class="num">${totalEmp}</div><div class="lbl">${empLabel}</div></div>
     <div class="summary-card amber"><div class="num">${totDaysWorked}</div><div class="lbl">أيام العمل الفعلية</div></div>
-    <div class="summary-card green"><div class="num">${hoursToHHMM(totApproved) || '0:00'}</div><div class="lbl">إجمالي الأوفر تايم</div></div>
+    <div class="summary-card green"><div class="num">${fmtApproved(totApproved, sumAsNumber) || '0:00'}</div><div class="lbl">إجمالي الأوفر تايم</div></div>
     <div class="summary-card purple"><div class="num">${totSaharDays}</div><div class="lbl">ليالي السهر</div></div>
     <div class="summary-card cyan"><div class="num">${totClarif}</div><div class="lbl">إجمالي أيام Clarification</div></div>
     <div class="summary-card emerald"><div class="num">${totFri}</div><div class="lbl">أيام الجمعات</div></div>
@@ -620,6 +662,8 @@ function renderEmployeeDetail(filterId) {
   const avgOt = t.otDays ? t.approved / t.otDays : 0;
   const role = getEmployeeRole(e.name);
   const roleLabel = role === 'exempt' ? 'معفي' : (role === 'staff' ? 'Staff' : 'Worker');
+  const dDept = getDeptConfig();
+  const dAsNumber = !!(dDept && (dDept.otTotalNumber || dDept.otRowNumber));
   panel.innerHTML = `
     <div class="emp-card">
       <div class="emp-head">
@@ -631,11 +675,11 @@ function renderEmployeeDetail(filterId) {
           <span>${recordCount} سجل</span>
           <span>·</span>
           <span>${t.daysWorked} يوم عمل</span>
-          ${t.otDays ? `<span>·</span><span>متوسط أوفر تايم/يوم: ${hoursToHHMM(avgOt)}</span>` : ''}
+          ${t.otDays ? `<span>·</span><span>متوسط أوفر تايم/يوم: ${fmtApproved(avgOt, dAsNumber)}</span>` : ''}
         </div>
       </div>
       <div class="emp-stats">
-        <div class="estat"><div class="estat-num">${hoursToHHMM(t.approved) || '0:00'}</div><div class="estat-lbl">إجمالي الأوفر تايم</div></div>
+        <div class="estat"><div class="estat-num">${fmtApproved(t.approved, dAsNumber) || '0:00'}</div><div class="estat-lbl">إجمالي الأوفر تايم</div></div>
         <div class="estat purple"><div class="estat-num">${t.saharDays}</div><div class="estat-lbl">ليالي السهر</div></div>
         <div class="estat emerald"><div class="estat-num">${t.friDays}</div><div class="estat-lbl">أيام جمعة</div></div>
         <div class="estat sky"><div class="estat-num">${t.satDays}</div><div class="estat-lbl">أيام سبت</div></div>
@@ -652,6 +696,10 @@ function renderPreview() {
   const tbody = document.querySelector('#preview-table tbody');
   tbody.innerHTML = '';
   const list = filterId ? state.employees.filter(e => String(e.id) === String(filterId)) : state.employees;
+  // Match the export's Approved formatting (plain number vs time) per department.
+  const dept = getDeptConfig();
+  const rowAsNumber = !!(dept && dept.otRowNumber);
+  const totalAsNumber = !!(dept && (dept.otTotalNumber || dept.otRowNumber));
 
   for (const e of list) {
     for (const d of e.days) {
@@ -679,7 +727,7 @@ function renderPreview() {
         <td class="cell-num">${hoursToHHMM(d.from)}</td>
         <td class="cell-num">${hoursToHHMM(d.to)}</td>
         <td class="cell-num">${hoursToHHMM(d.hours)}</td>
-        <td class="cell-num"><strong>${hoursToHHMM(calc.approved)}</strong></td>
+        <td class="cell-num"><strong>${fmtApproved(calc.approved, rowAsNumber)}</strong></td>
         <td class="cell-num">${calc.clarification || ''}</td>
         <td>${tag}</td>
       `;
@@ -698,7 +746,7 @@ function renderPreview() {
       <td></td>
       <td></td>
       <td class="cell-num">${hoursToHHMM(totalRaw)}</td>
-      <td class="cell-num"><strong>${hoursToHHMM(e.totals.approved)}</strong></td>
+      <td class="cell-num"><strong>${fmtApproved(e.totals.approved, totalAsNumber)}</strong></td>
       <td class="cell-num">${e.totals.clarification || ''}</td>
       <td></td>
     `;
@@ -750,6 +798,17 @@ async function exportXlsx() {
   await wb.xlsx.load(state.originalBytes);
   const ws = wb.worksheets[0];
 
+  // Approved is held internally as decimal hours. Most departments display it as a
+  // time ([h]:mm); Transportation/Security instead write plain numbers to match the
+  // manual HR sheets (Transportation rows + total, Security only the total).
+  const exportDept = getDeptConfig();
+  const rowAsNumber = !!(exportDept && exportDept.otRowNumber);
+  const totalAsNumber = !!(exportDept && (exportDept.otTotalNumber || exportDept.otRowNumber));
+  const writeApproved = (cell, hours, asNumber, font) => {
+    if (asNumber) setCellWithFormat(cell, hours || null, '0.##', font);
+    else setCellWithFormat(cell, hours ? hours / 24 : null, '[h]:mm', font);
+  };
+
   // Find header row by scanning for "Approved Days" — usually row 6.
   let headerRowNum = 6;
   for (let r = 1; r <= 20; r++) {
@@ -783,7 +842,7 @@ async function exportXlsx() {
         const totRefFont = rowRefFont(ws, r);
         const hT = ws.getCell(r, 8);
         const iT = ws.getCell(r, 9);
-        setCellWithFormat(hT, tot.approved ? tot.approved / 24 : null, '[h]:mm', totRefFont);
+        writeApproved(hT, tot.approved, totalAsNumber, totRefFont);
         setCellWithFormat(iT, tot.clarification || null, '0', totRefFont);
       }
       currentEmpId = null;
@@ -818,7 +877,7 @@ async function exportXlsx() {
     // Pull the row's font (from Name/Day cells) so red-row text stays red in H/I too
     const refFont = rowRefFont(ws, r);
 
-    setCellWithFormat(hCell, calc.approved ? calc.approved / 24 : null, '[h]:mm', refFont);
+    writeApproved(hCell, calc.approved, rowAsNumber, refFont);
     // Clarification holds a day count (1, 2, 3) — force integer format so the cell
     // can't be misread as a time fraction (Excel renders "1" as "24:00" when a time
     // number-format is inherited from a sibling cell's shared style).
@@ -954,7 +1013,13 @@ function renderDeptInfo() {
   const rules = [];
   if (dept.defaultRole === 'staff') rules.push('الأصل: <b>Staff</b> — مفيش credit للأعياد (بدل راحة بدلها)');
   else rules.push('الأصل: <b>Worker</b> — credit الأعياد بيتطبق');
-  if (dept.driverBonus) rules.push('🚚 Drivers OT = <code>max(0, إجمالي الساعات − 15)</code>');
+  if (dept.driverBonus) {
+    const st = dept.driverOtStart ?? 17.0;
+    const bn = dept.driverDailyBonus ?? 2;
+    const hh = Math.floor(st); const mm = Math.round((st - hh) * 60);
+    rules.push(`🚚 Drivers OT = <code>${bn} + max(0, To − ${pad(hh)}:${pad(mm)})</code> كل يوم شغل (بونص يومي ثابت + أوفر تايم بعد ${pad(hh)}:${pad(mm)})`);
+  }
+  if (dept.nightShiftFlat != null) rules.push(`🌙 أي شيفت بينتهي 00:00 = <b>${hoursToHHMM(dept.nightShiftFlat)}</b> أوفر تايم (حتى في الجمعة والأعياد)`);
   if (dept.saharAsOt) rules.push('🌙 شيفت السهر بيتسجّل OT في <b>Approved</b> مش في Night');
   if (dept.personOtStart) {
     for (const [n, h] of Object.entries(dept.personOtStart)) {
