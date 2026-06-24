@@ -157,6 +157,33 @@ function hoursToExcelTime(h) {
   return h / 24;
 }
 
+// Canonicalise an employee ID for cross-sheet matching. The same person's ID is
+// frequently stored differently in the department sheets vs the overall factory
+// sheet — as a number (1234) in one and text in the other ("1234", " 1234 ",
+// "1234.0", "1,234", or zero-padded "001234"). Without normalising, those rows
+// silently fail to match and the factory sheet ends up under-filled / inaccurate.
+//   - Numeric IDs collapse to their canonical numeric form (drops thousands
+//     separators, trailing ".0", surrounding spaces, and leading zeros).
+//   - Non-numeric IDs are trimmed and lower-cased so case/spacing don't matter.
+function normalizeId(raw) {
+  if (raw == null) return '';
+  const s = String(raw).trim();
+  if (s === '') return '';
+  const cleaned = s.replace(/,/g, '');
+  if (/^-?\d+(\.\d+)?$/.test(cleaned)) {
+    const n = Number(cleaned);
+    if (!isNaN(n)) return String(n);
+  }
+  return s.toLowerCase();
+}
+
+// Round decimal hours/day-counts to 2 places before writing to a sheet, so a
+// floating-point sum like 15.299999999999999 lands as 15.3 instead of a long
+// imprecise tail. Matches how the per-department totals are displayed.
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 // Parse an Excel cell representing a time/duration (HH:MM) into hours (decimal).
 // Prefer the formatted display string `w` (e.g. "16:30", "24:00", "2:30") — it's the
 // most reliable representation and avoids timezone issues with Date objects.
@@ -1428,12 +1455,16 @@ async function fillOverallSheet() {
     });
   }
 
-  // Build id → totals map across all processed dept slots
+  // Build id → totals map across all processed dept slots. Keyed by the
+  // canonical ID form (see normalizeId) so number/text/zero-padded variants of
+  // the same ID still match the factory sheet's column A.
   const byId = new Map();
   for (const slot of batch.depts) {
     if (!slot.processed) continue;
     for (const e of slot.employees) {
-      byId.set(String(e.id).trim(), {
+      const key = normalizeId(e.id);
+      if (!key) continue;
+      byId.set(key, {
         hours: e.totals.approved,
         days: e.totals.clarification,
       });
@@ -1460,24 +1491,35 @@ async function fillOverallSheet() {
       else if (ref === 'I' + rowNum) iCell = cells[ci];
     }
     if (!aCell) continue;
-    const vEl = aCell.getElementsByTagName('v')[0];
-    if (!vEl) continue;
-    let idStr = vEl.textContent.trim();
-    if (aCell.getAttribute('t') === 's') {
-      const idx = parseInt(idStr, 10);
-      idStr = sharedStrings[idx] || '';
+    const aType = aCell.getAttribute('t');
+    let idStr;
+    if (aType === 'inlineStr') {
+      // Inline string: value lives in <is><t>…</t></is>, not <v>.
+      const isEl = aCell.getElementsByTagName('is')[0];
+      const tEl = isEl && isEl.getElementsByTagName('t')[0];
+      idStr = tEl ? tEl.textContent.trim() : '';
+    } else {
+      const vEl = aCell.getElementsByTagName('v')[0];
+      if (!vEl) continue;
+      idStr = vEl.textContent.trim();
+      if (aType === 's') {
+        const idx = parseInt(idStr, 10);
+        idStr = sharedStrings[idx] || '';
+      }
     }
-    const m = byId.get(String(idStr).trim());
+    if (!idStr) continue;
+    const key = normalizeId(idStr);
+    const m = byId.get(key);
     if (!m) continue;
-    matchedIds.add(String(idStr).trim());
+    matchedIds.add(key);
 
     if (m.days) {
-      setSheetCellNumeric(doc, row, NS, 'G', rowNum, m.days, gCell);
+      setSheetCellNumeric(doc, row, NS, 'G', rowNum, round2(m.days), gCell);
     }
     if (m.hours) {
       // The template's I column is formatted as a decimal number (s="17" → "0.00"),
       // not as a time fraction — so write hours directly. e.g. 7:30 → 7.5.
-      setSheetCellNumeric(doc, row, NS, 'I', rowNum, m.hours, iCell);
+      setSheetCellNumeric(doc, row, NS, 'I', rowNum, round2(m.hours), iCell);
     }
     filled++;
   }
