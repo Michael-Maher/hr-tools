@@ -142,14 +142,13 @@ function hoursToHHMM(h) {
   if (mm === 60) return `${sign}${pad(hh + 1)}:00`;
   return `${sign}${pad(hh)}:${pad(mm)}`;
 }
-// Display an Approved value (decimal hours) the same way the export will write it:
-// as a plain number for number-format departments, otherwise as a time. `asNumber`
-// is decided by the caller (row vs total can differ — Security writes time rows but
-// a number total).
-function fmtApproved(h, asNumber) {
+// Display an Approved value (decimal hours) the same way the export now writes it:
+// as a plain rounded decimal number (e.g. 7.5, 15.25) for every department. The
+// `asNumber` argument is kept for call-site compatibility but no longer changes the
+// result — Approved is always shown/written as a number, never an Excel time.
+function fmtApproved(h, _asNumber) {
   if (h == null || isNaN(h) || h === 0) return '';
-  if (asNumber) return String(Math.round(h * 100) / 100);
-  return hoursToHHMM(h);
+  return String(Math.round(h * 100) / 100);
 }
 function hoursToExcelTime(h) {
   // Excel time = fraction of day
@@ -667,7 +666,7 @@ function renderSummary() {
   grid.innerHTML = `
     <div class="summary-card"><div class="num">${totalEmp}</div><div class="lbl">${empLabel}</div></div>
     <div class="summary-card amber"><div class="num">${totDaysWorked}</div><div class="lbl">أيام العمل الفعلية</div></div>
-    <div class="summary-card green"><div class="num">${fmtApproved(totApproved, sumAsNumber) || '0:00'}</div><div class="lbl">إجمالي الأوفر تايم</div></div>
+    <div class="summary-card green"><div class="num">${fmtApproved(totApproved, sumAsNumber) || '0'}</div><div class="lbl">إجمالي الأوفر تايم</div></div>
     <div class="summary-card purple"><div class="num">${totSaharDays}</div><div class="lbl">ليالي السهر</div></div>
     <div class="summary-card cyan"><div class="num">${totClarif}</div><div class="lbl">إجمالي أيام Clarification</div></div>
     <div class="summary-card emerald"><div class="num">${totFri}</div><div class="lbl">أيام الجمعات</div></div>
@@ -706,7 +705,7 @@ function renderEmployeeDetail(filterId) {
         </div>
       </div>
       <div class="emp-stats">
-        <div class="estat"><div class="estat-num">${fmtApproved(t.approved, dAsNumber) || '0:00'}</div><div class="estat-lbl">إجمالي الأوفر تايم</div></div>
+        <div class="estat"><div class="estat-num">${fmtApproved(t.approved, dAsNumber) || '0'}</div><div class="estat-lbl">إجمالي الأوفر تايم</div></div>
         <div class="estat purple"><div class="estat-num">${t.saharDays}</div><div class="estat-lbl">ليالي السهر</div></div>
         <div class="estat emerald"><div class="estat-num">${t.friDays}</div><div class="estat-lbl">أيام جمعة</div></div>
         <div class="estat sky"><div class="estat-num">${t.satDays}</div><div class="estat-lbl">أيام سبت</div></div>
@@ -825,15 +824,14 @@ async function exportXlsx() {
   await wb.xlsx.load(state.originalBytes);
   const ws = wb.worksheets[0];
 
-  // Approved is held internally as decimal hours. Most departments display it as a
-  // time ([h]:mm); Transportation/Security instead write plain numbers to match the
-  // manual HR sheets (Transportation rows + total, Security only the total).
-  const exportDept = getDeptConfig();
-  const rowAsNumber = !!(exportDept && exportDept.otRowNumber);
-  const totalAsNumber = !!(exportDept && (exportDept.otTotalNumber || exportDept.otRowNumber));
-  const writeApproved = (cell, hours, asNumber, font) => {
-    if (asNumber) setCellWithFormat(cell, hours || null, '0.##', font);
-    else setCellWithFormat(cell, hours ? hours / 24 : null, '[h]:mm', font);
+  // Approved is held internally as decimal hours. We write it as a plain rounded
+  // decimal number (e.g. 7.5, 15.25) for BOTH the daily rows and the total, in every
+  // department. Writing it as an Excel time serial (hours/24 + [h]:mm) stored a
+  // fraction-of-a-day under the hood, which made the total behave like days when
+  // edited and rounded every value to the nearest minute — see the "make it a number"
+  // fix HR was doing by hand. A real number edits cleanly and stays exact.
+  const writeApproved = (cell, hours, _asNumber, font) => {
+    setCellWithFormat(cell, hours ? round2(hours) : null, '0.##', font);
   };
 
   // Find header row by scanning for "Approved Days" — usually row 6.
@@ -869,7 +867,7 @@ async function exportXlsx() {
         const totRefFont = rowRefFont(ws, r);
         const hT = ws.getCell(r, 8);
         const iT = ws.getCell(r, 9);
-        writeApproved(hT, tot.approved, totalAsNumber, totRefFont);
+        writeApproved(hT, tot.approved, null, totRefFont);
         setCellWithFormat(iT, tot.clarification || null, '0', totRefFont);
       }
       currentEmpId = null;
@@ -904,7 +902,7 @@ async function exportXlsx() {
     // Pull the row's font (from Name/Day cells) so red-row text stays red in H/I too
     const refFont = rowRefFont(ws, r);
 
-    writeApproved(hCell, calc.approved, rowAsNumber, refFont);
+    writeApproved(hCell, calc.approved, null, refFont);
     // Clarification holds a day count (1, 2, 3) — force integer format so the cell
     // can't be misread as a time fraction (Excel renders "1" as "24:00" when a time
     // number-format is inherited from a sibling cell's shared style).
