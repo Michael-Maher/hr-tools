@@ -91,13 +91,24 @@ const DEPT_BY_KEY = Object.fromEntries(DEPARTMENTS.map(d => [d.key, d]));
 function normName(s) {
   return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
-// Loose substring match — handles "Tamer Ahmed" vs "Tamer", etc.
+// Whole-word name match. A config entry matches an employee when the names are
+// equal, OR when one is a leading whole-word prefix of the other AND the shorter
+// side has at least two tokens (a full name like "Khaled Amer" still matches
+// "Khaled Amer Hassan"). A bare single first name like "Ayman" therefore matches
+// ONLY someone recorded exactly as "Ayman" — it will NOT wrongly catch a different
+// person such as "Ayman Ramzy Ahmed". (Confirmed against HR sheets where 2344
+// "Ayman Ramzy Ahmed" is a normal paid worker, not the exempt engineer.)
 function nameMatchesAny(actual, list) {
   if (!list || !list.length) return false;
   const a = normName(actual);
+  if (!a) return false;
   return list.some(n => {
     const e = normName(n);
-    return e && (a.includes(e) || e.includes(a));
+    if (!e) return false;
+    if (a === e) return true;
+    if (e.includes(' ') && a.startsWith(e + ' ')) return true;  // config is a full-name prefix of actual
+    if (a.includes(' ') && e.startsWith(a + ' ')) return true;  // actual is a prefix of a fuller config name
+    return false;
   });
 }
 // Returns the dept config for the current department, or null if none/invalid.
@@ -416,35 +427,15 @@ function calculateRow(parsed) {
     return out;
   }
 
-  // 2.5. Fri (on-time) + Holiday non-continuation: full-day OT formula
-  //      Per spec "Simplified Overtime Calculations":
-  //        08:00 → 16:30 = 8 OT      (entire morning counts on off-days)
-  //        16:30 → 24:00 = 7.5 OT    (sahar segment, break already excluded)
-  //        08:00 → 00:00 = 15.5 OT   (= 8 + 7.5, full day to midnight)
-  //      Saturday is excluded — spec only specifies day-credit handling for Sat,
-  //      so the post-16:30 OT formula is kept (matches confirmed HR files).
-  //      Both worker AND staff get full-day OT on holidays (only the day CREDIT
-  //      differs by role — they still worked the hours).
-  const isFridayOnTime = isFriday && !isFridayLate;
-  if (!isContinuation && (isFridayOnTime || !!holiday)) {
-    let approved;
-    if (from <= 12 + 0.001) {
-      // Morning start → whole shift is OT (minus break), capped at 15:30
-      out.kind = isFriday ? 'friday' : 'holiday';
-      approved = Math.min(s.continuationCap, work - breakHours);
-    } else if (endsAtMidnight) {
-      // Evening-only sahar start → spec sahar value (no break deduction)
-      out.kind = 'sahar';
-      approved = s.sahar.total;
-    } else {
-      // Afternoon shift not reaching midnight → regular post-otStart OT
-      out.kind = isFriday ? 'friday' : 'holiday';
-      approved = Math.max(0, to - otStart);
-    }
-    if (approved < s.minOtHours) approved = 0;
-    out.approved = approved;
-    return out;
-  }
+  // 2.5. Fri (on-time) + Holiday, NON-continuation day shifts are treated exactly
+  //      like a normal working day for OT purposes: the day CREDIT is granted above
+  //      (Fri = 2, holiday = 2 for workers), but Approved OT only counts hours worked
+  //      PAST the shift end (16:30) — an on-time 08:00→16:30 day earns 0 OT, just the
+  //      credit. Confirmed against HR's manually-calculated sheets (e.g. Warehouse
+  //      06-2026: 08:00→16:30 on the 06-18 holiday → Approved empty, Clarification 2).
+  //      There is NO "full-day OT" formula: such shifts simply fall through to the
+  //      sahar rule (block 3, midnight shifts = 7.5) or the regular post-16:30 OT
+  //      rule (block 4), which already label the day friday/holiday.
 
   // 3. Sahar shift (regular weekdays + Saturday) — full evening to midnight.
   //    Counts as 7:30 OT in Approved (matches confirmed HR files).
@@ -474,15 +465,29 @@ function calculateRow(parsed) {
 function linkContinuationChains(emp) {
   const s = state.settings;
   if (!getDeptConfig()) return;  // no dept selected → calculateRow already zeroed everything
-  for (let i = 1; i < emp.days.length; i++) {
+  for (let i = 0; i < emp.days.length; i++) {
     const cur = emp.days[i];
-    const prev = emp.days[i - 1];
-    if (!cur.calc || !prev.calc) continue;
-    if (cur.calc.kind !== 'continuation' || prev.calc.kind !== 'sahar') continue;
+    if (!cur.calc || cur.calc.kind !== 'continuation') continue;
+    const prev = i > 0 ? emp.days[i - 1] : null;
+    const prevIsSahar = !!(prev && prev.calc && prev.calc.kind === 'sahar');
     const t = cur.to;
     if (t == null) continue;
+
+    if (!prevIsSahar) {
+      // A From=0:00 row is only a real "worked through midnight" continuation when the
+      // PREVIOUS day was an evening/sahar shift. With no preceding sahar (e.g. the first
+      // row of the month, or an isolated midnight punch) it isn't an overnight session —
+      // per the rules it's an ordinary day, so OT only counts past the shift end (16:30).
+      // Day credits were already decided in calculateRow and are left untouched.
+      let reg = Math.max(0, t - s.shiftEnd);
+      if (reg < s.minOtHours) reg = 0;
+      cur.calc.approved = reg;
+      continue;
+    }
+
     if (t <= s.shiftEnd + 0.001 || Math.abs(t - s.sahar.end) < 0.01) {
-      // lump: morning absorbs the night
+      // lump: morning absorbs the night → Approved = min(To − 0:30 break, 15:30 cap)
+      // per the documented rule 2.
       prev.calc.approved = 0;
       let mor = Math.min(t - s.breakMinutes / 60, s.continuationCap);
       if (mor < s.minOtHours) mor = 0;

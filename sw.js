@@ -1,6 +1,6 @@
 // HR Tools — service worker (offline-capable PWA shell).
 // Bump CACHE version whenever the precached assets change.
-const CACHE = 'hr-tools-v1';
+const CACHE = 'hr-tools-v2';
 
 // Core shell, resolved relative to the SW location (repo root) so it works no
 // matter what sub-path the site is hosted under.
@@ -10,8 +10,8 @@ const CORE = [
   'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
   'overtime-calculator/', 'overtime-calculator/index.html',
   'overtime-calculator/style.css',
-  'overtime-calculator/app.js?v=20260527b',
-  'overtime-calculator/holidays.js?v=20260527b',
+  'overtime-calculator/app.js?v=20260715',
+  'overtime-calculator/holidays.js?v=20260715',
   'hiring-sheet/index.html', 'hiring-sheet/style.css', 'hiring-sheet/app.js',
 ].map(p => new URL(p, self.location).toString());
 
