@@ -912,3 +912,14 @@ footer {
   .settings-grid { grid-template-columns: 1fr; }
   .summary-grid { grid-template-columns: 1fr; }
 }
+
+/* Unmatched-employee list inside the batch summary warning */
+table.batch-unmatched {
+  width: 100%;
+  margin-top: 8px;
+  background: #fff;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+table.batch-unmatched th, table.batch-unmatched td { padding: 5px 8px; text-align: right; }

@@ -1295,15 +1295,15 @@ async function batchProcessAll() {
     state.settings.department = savedDept;
 
     // Fill the overall sheet
-    let filledRows = 0, unmatchedIds = 0, overallError = null;
+    let filledRows = 0, unmatched = [], overallError = null;
     if (batch.overall && batch.overall.bytes) {
       try {
         const result = await fillOverallSheet();
         batch.overallOutBytes = result.bytes;
         filledRows = result.filled;
-        unmatchedIds = result.unmatched;
+        unmatched = result.unmatched;
         document.getElementById('btn-batch-download-overall').disabled = false;
-        console.log(`[batch] Filled ${filledRows} rows in overall sheet (${unmatchedIds} dept-sheet IDs had no match).`);
+        console.log(`[batch] Filled ${filledRows} rows in overall sheet (${unmatched.length} dept-sheet IDs had no match).`, unmatched);
       } catch (err) {
         console.error('[batch] fillOverallSheet failed:', err);
         overallError = err.message || String(err);
@@ -1312,7 +1312,7 @@ async function batchProcessAll() {
       }
     }
     renderBatchDepts();
-    renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds, overallError);
+    renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overallError);
   } finally {
     btn.textContent = '▶ ابدأ الحساب';
     updateBatchProcessButton();
@@ -1380,6 +1380,24 @@ function processWorkbookPassthrough(wb) {
     const n = parseFloat(String(v ?? '').trim());
     return isNaN(n) ? 0 : n;
   };
+  // Approved holds decimal HOURS. exportXlsx writes it as a plain number (7.5),
+  // older sheets / hand entry use an Excel time ("7:30"). cellToHours() alone is
+  // wrong here: it treats any non-integer number as a fraction-of-a-day and turns
+  // 7.5 into 180 — which is exactly what inflated the factory sheet 24×. So:
+  //   - time-formatted cell ("7:30", "31:00", Date) → cellToHours
+  //   - plain number → already hours (a value < 1 can only be a day fraction)
+  //   - plain text  → parseFloat, falling back to cellToHours for "H:MM"
+  const hoursVal = (c) => {
+    const v = cv(c);
+    if (v == null || v === '') return 0;
+    const w = (c && typeof c === 'object' && c.w) ? String(c.w).trim() : '';
+    if (v instanceof Date || /:/.test(w)) return cellToHours(c) || 0;
+    if (typeof v === 'number') return v < 1 ? v * 24 : v;
+    const s = String(v).trim();
+    if (/:/.test(s)) return cellToHours(s) || 0;
+    const n = parseFloat(s);
+    return isNaN(n) ? 0 : n;
+  };
   const employees = [];
   let cur = null;
   for (let i = 6; i < rows.length; i++) {
@@ -1389,7 +1407,19 @@ function processWorkbookPassthrough(wb) {
     const nameVal = cv(r[3]);
     if (dayVal == null && idVal == null && nameVal == null) continue;
     if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
-      if (cur) { cur.totalRowIndex = i; employees.push(cur); cur = null; }
+      if (cur) {
+        cur.totalRowIndex = i;
+        // HR often corrects the employee's Total row by hand after the sheet is
+        // calculated. That row is what they signed off, so the factory sheet must
+        // carry it — not our own re-sum of the daily rows. Empty cells fall back
+        // to the row sum in computeEmployeeTotals.
+        cur.sheetTotals = {
+          approved: cv(r[7]) != null && cv(r[7]) !== '' ? hoursVal(r[7]) : null,
+          clarification: cv(r[8]) != null && cv(r[8]) !== '' ? numVal(r[8]) : null,
+        };
+        employees.push(cur);
+        cur = null;
+      }
       continue;
     }
     if (idVal == null || nameVal == null) continue;
@@ -1407,7 +1437,7 @@ function processWorkbookPassthrough(wb) {
       to: cellToHours(r[5]),
       hours: cellToHours(r[6]),
       calc: {
-        approved: cellToHours(r[7]) || 0,   // existing Approved Days (time)
+        approved: hoursVal(r[7]),            // existing Approved Days (decimal hours)
         clarification: numVal(r[8]),         // existing Clarification (day count)
         kind: 'passthrough',
         role: 'worker',
@@ -1417,6 +1447,10 @@ function processWorkbookPassthrough(wb) {
   if (cur) employees.push(cur);
   for (const e of employees) {
     e.totals = computeEmployeeTotals(e);
+    if (e.sheetTotals) {
+      if (e.sheetTotals.approved != null) e.totals.approved = e.sheetTotals.approved;
+      if (e.sheetTotals.clarification != null) e.totals.clarification = e.sheetTotals.clarification;
+    }
   }
   return employees;
 }
@@ -1464,10 +1498,16 @@ async function fillOverallSheet() {
   const byId = new Map();
   for (const slot of batch.depts) {
     if (!slot.processed) continue;
+    const source = (slot.calculate && DEPT_BY_KEY[slot.deptKey])
+      ? DEPT_BY_KEY[slot.deptKey].label
+      : (slot.fileName || slot.slotId);
     for (const e of slot.employees) {
       const key = normalizeId(e.id);
       if (!key) continue;
       byId.set(key, {
+        id: e.id,
+        name: e.name,
+        source,
         hours: e.totals.approved,
         days: e.totals.clarification,
       });
@@ -1542,7 +1582,12 @@ async function fillOverallSheet() {
     compression: 'DEFLATE',
     compressionOptions: { level: 6 },
   });
-  const unmatched = byId.size - matchedIds.size;
+  // Employees that came from a department sheet but have no row in the factory
+  // sheet — returned with their details so HR can see exactly who was dropped.
+  const unmatched = [];
+  for (const [key, m] of byId) {
+    if (!matchedIds.has(key)) unmatched.push(m);
+  }
   return { bytes: outBytes, filled, unmatched };
 }
 
@@ -1623,7 +1668,11 @@ function batchDownloadOverall() {
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
 }
 
-function renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds, overallError) {
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overallError) {
   const el = document.getElementById('batch-summary');
   const processedDepts = batch.depts.filter(s => s.processed).length;
   const hasOverall = !!batch.overallOutBytes;
@@ -1642,9 +1691,22 @@ function renderBatchSummary(totalEmps, totalDays, filledRows, unmatchedIds, over
     </div>
     ${filledNoneWarning}
     ${errorBox}
-    ${unmatchedIds > 0
-      ? `<div class="batch-warn">⚠ في ${unmatchedIds} موظف من شيتات الأقسام مالقاش له صف في شيت المصنع — تأكد إن الـ IDs متطابقة.</div>`
-      : ''}
+    ${unmatched.length > 0 ? `
+      <div class="batch-warn">
+        ⚠ في ${unmatched.length} موظف من شيتات الأقسام مالقاش له صف في شيت المصنع — تأكد إن الـ ID موجود في عمود A بنفس الرقم:
+        <table class="preview batch-unmatched">
+          <thead><tr><th>ID</th><th>الاسم</th><th>الشيت</th><th>ساعات OT</th><th>أيام</th></tr></thead>
+          <tbody>
+            ${unmatched.map(u => `<tr>
+              <td>${escapeHtml(u.id)}</td>
+              <td>${escapeHtml(u.name)}</td>
+              <td>${escapeHtml(u.source)}</td>
+              <td>${round2(u.hours || 0)}</td>
+              <td>${round2(u.days || 0)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : ''}
   `;
   el.classList.remove('hidden');
 }
