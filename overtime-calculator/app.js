@@ -561,50 +561,73 @@ function processWorkbook(wb) {
   state.rawRows = rows;
   state.workbook = wb;
   state.sheetName = sheetName;
+  state.employees = calculateEmployees(groupEmployeeBlocks(rows));
+}
 
-  // Group by employee. Each employee block ends at a row with col A = 'Total:'
+// Group a department sheet's rows into one block per employee. A block ends at
+// its "Total:" row. Inside a block the ID cell is sometimes wrong on a few rows —
+// Excel auto-fill turning 3907 into 3907, 3908, 3909…, or the previous employee's
+// ID left on the first row. Splitting on every ID change turned each stray ID
+// into a fake one-day "employee" that then overwrote a real person's totals in
+// the factory sheet. So the NAME carries the block: it continues while either the
+// ID or the name is unchanged, and takes the ID most of its rows carry (on a tie,
+// the first row's — the value auto-fill started from). Blocks whose rows
+// disagreed keep the IDs they saw in `idConflict` so HR can fix the sheet.
+function groupEmployeeBlocks(rows) {
+  const cv = (c) => (c && typeof c === 'object' && 'v' in c) ? c.v : c;
   const employees = [];
   let cur = null;
+  const close = (totalRowIndex) => {
+    if (!cur) return;
+    if (totalRowIndex != null) cur.totalRowIndex = totalRowIndex;
+    const counts = new Map();
+    for (const d of cur.days) {
+      const k = normalizeId(d.id);
+      if (!counts.has(k)) counts.set(k, { id: d.id, n: 0 });
+      counts.get(k).n++;
+    }
+    let best = null;
+    for (const c of counts.values()) if (!best || c.n > best.n) best = c;  // Map keeps first-seen order → tie goes to the first row
+    cur.id = best.id;
+    if (counts.size > 1) cur.idConflict = [...counts.values()].map(c => c.id);
+    employees.push(cur);
+    cur = null;
+  };
   for (let i = 6; i < rows.length; i++) {
     const r = rows[i];
     const dayVal = cv(r[0]);
     const idVal = cv(r[2]);
     const nameVal = cv(r[3]);
     if (dayVal == null && idVal == null && nameVal == null) continue;
-    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
-      if (cur) {
-        cur.totalRowIndex = i;
-        employees.push(cur);
-        cur = null;
-      }
-      continue;
-    }
+    if (typeof dayVal === 'string' && /total/i.test(dayVal)) { close(i); continue; }
     if (idVal == null || nameVal == null) continue;
-    if (!cur || cur.id !== idVal) {
-      if (cur) employees.push(cur);
-      cur = { id: idVal, name: String(nameVal).trim(), days: [], firstRowIndex: i };
-    }
+    const name = String(nameVal).trim();
+    if (cur && normalizeId(cur.days[cur.days.length - 1].id) !== normalizeId(idVal)
+        && normName(cur.name) !== normName(name)) close();
+    if (!cur) cur = { id: idVal, name, days: [], firstRowIndex: i };
     cur.days.push({
       rowIndex: i,
       day: dayVal,
       date: cellToDate(r[1]),
       id: idVal,
-      name: String(nameVal).trim(),
+      name,
       from: cellToHours(r[4]),
       to: cellToHours(r[5]),
       hours: cellToHours(r[6]),
     });
   }
-  if (cur) employees.push(cur);
+  close();
+  return employees;
+}
 
-  // Compute calculations (two passes: per-row, then chain linking for sahar→cont)
+// Compute calculations (two passes: per-row, then chain linking for sahar→cont)
+function calculateEmployees(employees) {
   for (const e of employees) {
     for (const d of e.days) d.calc = calculateRow(d);
     linkContinuationChains(e);
     e.totals = computeEmployeeTotals(e);
   }
-
-  state.employees = employees;
+  return employees;
 }
 
 // ---------- holidays (shared with /holidays.html via localStorage) ----------
@@ -846,60 +869,29 @@ async function exportXlsx() {
     if (v && String(v).toLowerCase().includes('approved')) { headerRowNum = r; break; }
   }
 
-  // Build an index of (id, dateISO) → calculation so we can match by content even if rows shift
-  const byKey = new Map();
+  // Index results by sheet row number. We reload the same original bytes the
+  // employees were parsed from, so parsed rowIndex (0-based) + 1 is exactly the
+  // ExcelJS row. Keying by the row's own ID cell instead skipped every row whose
+  // ID was mistyped (see groupEmployeeBlocks) and lost that employee's Total.
+  const byRow = new Map();
   for (const e of state.employees) {
-    for (const d of e.days) {
-      const k = `${e.id}|${fmtDate(d.date)}`;
-      byKey.set(k, d.calc);
-    }
-    byKey.set(`total|${e.id}`, e.totals);
+    for (const d of e.days) byRow.set(d.rowIndex + 1, { calc: d.calc });
+    if (e.totalRowIndex != null) byRow.set(e.totalRowIndex + 1, { total: e.totals });
   }
 
   // Walk all rows starting just after the header row
-  let currentEmpId = null;
   for (let r = headerRowNum + 1; r <= ws.rowCount; r++) {
-    const dayCell = ws.getCell(r, 1);
-    const idCell  = ws.getCell(r, 3);
-    const dateCell= ws.getCell(r, 2);
-    const dayVal  = dayCell.value;
+    const hit = byRow.get(r);
+    if (!hit) continue;
 
-    // Total row
-    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
-      if (currentEmpId == null) continue;
-      const tot = byKey.get(`total|${currentEmpId}`);
-      if (tot) {
-        const totRefFont = rowRefFont(ws, r);
-        const hT = ws.getCell(r, 8);
-        const iT = ws.getCell(r, 9);
-        writeApproved(hT, tot.approved, null, totRefFont);
-        setCellWithFormat(iT, tot.clarification || null, '0', totRefFont);
-      }
-      currentEmpId = null;
+    if (hit.total) {
+      const tot = hit.total;
+      const totRefFont = rowRefFont(ws, r);
+      writeApproved(ws.getCell(r, 8), tot.approved, null, totRefFont);
+      setCellWithFormat(ws.getCell(r, 9), tot.clarification || null, '0', totRefFont);
       continue;
     }
-
-    const id = idCell.value;
-    if (id == null) continue;
-    currentEmpId = id;
-
-    // Extract date for matching
-    let dateStr = null;
-    const dv = dateCell.value;
-    if (dv instanceof Date) {
-      // Shift into local-noon to avoid TZ rollover
-      const nd = new Date(dv.getTime() + 12 * 3600 * 1000);
-      dateStr = `${nd.getUTCFullYear()}-${pad(nd.getUTCMonth() + 1)}-${pad(nd.getUTCDate())}`;
-    } else if (typeof dv === 'string') {
-      const d2 = cellToDate({ w: dv });
-      if (d2) dateStr = fmtDate(d2);
-    } else if (typeof dv === 'number') {
-      const d2 = cellToDate(dv);
-      if (d2) dateStr = fmtDate(d2);
-    }
-    if (!dateStr) continue;
-    const calc = byKey.get(`${id}|${dateStr}`);
-    if (!calc) continue;
+    const calc = hit.calc;
 
     // Set Approved (H), Clarification (I)
     const hCell = ws.getCell(r, 8);
@@ -1295,13 +1287,14 @@ async function batchProcessAll() {
     state.settings.department = savedDept;
 
     // Fill the overall sheet
-    let filledRows = 0, unmatched = [], overallError = null;
+    let filledRows = 0, unmatched = [], overallError = null, warnings = { duplicates: [], idConflicts: [] };
     if (batch.overall && batch.overall.bytes) {
       try {
         const result = await fillOverallSheet();
         batch.overallOutBytes = result.bytes;
         filledRows = result.filled;
         unmatched = result.unmatched;
+        warnings = { duplicates: result.duplicates, idConflicts: result.idConflicts };
         document.getElementById('btn-batch-download-overall').disabled = false;
         console.log(`[batch] Filled ${filledRows} rows in overall sheet (${unmatched.length} dept-sheet IDs had no match).`, unmatched);
       } catch (err) {
@@ -1312,7 +1305,7 @@ async function batchProcessAll() {
       }
     }
     renderBatchDepts();
-    renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overallError);
+    renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overallError, warnings);
   } finally {
     btn.textContent = '▶ ابدأ الحساب';
     updateBatchProcessButton();
@@ -1322,45 +1315,8 @@ async function batchProcessAll() {
 // Parse + calculate one workbook and return the employees array (without mutating
 // global state.employees). Mirrors processWorkbook() but returns local data.
 function processWorkbookFor(wb) {
-  const sheetName = wb.SheetNames[0];
-  const ws = wb.Sheets[sheetName];
-  const rows = parseSheet(ws);
-  const cv = (c) => (c && typeof c === 'object' && 'v' in c) ? c.v : c;
-  const employees = [];
-  let cur = null;
-  for (let i = 6; i < rows.length; i++) {
-    const r = rows[i];
-    const dayVal = cv(r[0]);
-    const idVal = cv(r[2]);
-    const nameVal = cv(r[3]);
-    if (dayVal == null && idVal == null && nameVal == null) continue;
-    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
-      if (cur) { cur.totalRowIndex = i; employees.push(cur); cur = null; }
-      continue;
-    }
-    if (idVal == null || nameVal == null) continue;
-    if (!cur || cur.id !== idVal) {
-      if (cur) employees.push(cur);
-      cur = { id: idVal, name: String(nameVal).trim(), days: [], firstRowIndex: i };
-    }
-    cur.days.push({
-      rowIndex: i,
-      day: dayVal,
-      date: cellToDate(r[1]),
-      id: idVal,
-      name: String(nameVal).trim(),
-      from: cellToHours(r[4]),
-      to: cellToHours(r[5]),
-      hours: cellToHours(r[6]),
-    });
-  }
-  if (cur) employees.push(cur);
-  for (const e of employees) {
-    for (const d of e.days) d.calc = calculateRow(d);
-    linkContinuationChains(e);
-    e.totals = computeEmployeeTotals(e);
-  }
-  return employees;
+  const rows = parseSheet(wb.Sheets[wb.SheetNames[0]]);
+  return calculateEmployees(groupEmployeeBlocks(rows));
 }
 
 // Parse a sheet that was ALREADY calculated by hand. Instead of recomputing OT,
@@ -1398,58 +1354,26 @@ function processWorkbookPassthrough(wb) {
     const n = parseFloat(s);
     return isNaN(n) ? 0 : n;
   };
-  const employees = [];
-  let cur = null;
-  for (let i = 6; i < rows.length; i++) {
-    const r = rows[i];
-    const dayVal = cv(r[0]);
-    const idVal = cv(r[2]);
-    const nameVal = cv(r[3]);
-    if (dayVal == null && idVal == null && nameVal == null) continue;
-    if (typeof dayVal === 'string' && /total/i.test(dayVal)) {
-      if (cur) {
-        cur.totalRowIndex = i;
-        // HR often corrects the employee's Total row by hand after the sheet is
-        // calculated. That row is what they signed off, so the factory sheet must
-        // carry it — not our own re-sum of the daily rows. Empty cells fall back
-        // to the row sum in computeEmployeeTotals.
-        cur.sheetTotals = {
-          approved: cv(r[7]) != null && cv(r[7]) !== '' ? hoursVal(r[7]) : null,
-          clarification: cv(r[8]) != null && cv(r[8]) !== '' ? numVal(r[8]) : null,
-        };
-        employees.push(cur);
-        cur = null;
-      }
-      continue;
-    }
-    if (idVal == null || nameVal == null) continue;
-    if (!cur || cur.id !== idVal) {
-      if (cur) employees.push(cur);
-      cur = { id: idVal, name: String(nameVal).trim(), days: [], firstRowIndex: i };
-    }
-    cur.days.push({
-      rowIndex: i,
-      day: dayVal,
-      date: cellToDate(r[1]),
-      id: idVal,
-      name: String(nameVal).trim(),
-      from: cellToHours(r[4]),
-      to: cellToHours(r[5]),
-      hours: cellToHours(r[6]),
-      calc: {
+  const employees = groupEmployeeBlocks(rows);
+  for (const e of employees) {
+    for (const d of e.days) {
+      const r = rows[d.rowIndex];
+      d.calc = {
         approved: hoursVal(r[7]),            // existing Approved Days (decimal hours)
         clarification: numVal(r[8]),         // existing Clarification (day count)
         kind: 'passthrough',
         role: 'worker',
-      },
-    });
-  }
-  if (cur) employees.push(cur);
-  for (const e of employees) {
+      };
+    }
     e.totals = computeEmployeeTotals(e);
-    if (e.sheetTotals) {
-      if (e.sheetTotals.approved != null) e.totals.approved = e.sheetTotals.approved;
-      if (e.sheetTotals.clarification != null) e.totals.clarification = e.sheetTotals.clarification;
+    // HR often corrects the employee's Total row by hand after the sheet is
+    // calculated. That row is what they signed off, so the factory sheet must
+    // carry it — not our own re-sum of the daily rows. Empty cells fall back
+    // to the row sum in computeEmployeeTotals.
+    if (e.totalRowIndex != null) {
+      const t = rows[e.totalRowIndex];
+      if (cv(t[7]) != null && cv(t[7]) !== '') e.totals.approved = hoursVal(t[7]);
+      if (cv(t[8]) != null && cv(t[8]) !== '') e.totals.clarification = numVal(t[8]);
     }
   }
   return employees;
@@ -1495,15 +1419,29 @@ async function fillOverallSheet() {
   // Build id → totals map across all processed dept slots. Keyed by the
   // canonical ID form (see normalizeId) so number/text/zero-padded variants of
   // the same ID still match the factory sheet's column A.
+  // The same ID can legitimately appear in more than one block (an employee
+  // moved between departments mid-month). Those are SUMMED and reported back —
+  // silently keeping only the last block used to wipe the earlier one's totals.
   const byId = new Map();
+  const duplicates = [];
+  const idConflicts = [];
   for (const slot of batch.depts) {
     if (!slot.processed) continue;
     const source = (slot.calculate && DEPT_BY_KEY[slot.deptKey])
       ? DEPT_BY_KEY[slot.deptKey].label
       : (slot.fileName || slot.slotId);
     for (const e of slot.employees) {
+      if (e.idConflict) idConflicts.push({ id: e.id, name: e.name, source, seen: e.idConflict });
       const key = normalizeId(e.id);
       if (!key) continue;
+      const prev = byId.get(key);
+      if (prev) {
+        prev.hours += e.totals.approved;
+        prev.days += e.totals.clarification;
+        prev.source += ' + ' + source;
+        if (!duplicates.includes(prev)) duplicates.push(prev);
+        continue;
+      }
       byId.set(key, {
         id: e.id,
         name: e.name,
@@ -1588,7 +1526,7 @@ async function fillOverallSheet() {
   for (const [key, m] of byId) {
     if (!matchedIds.has(key)) unmatched.push(m);
   }
-  return { bytes: outBytes, filled, unmatched };
+  return { bytes: outBytes, filled, unmatched, duplicates, idConflicts };
 }
 
 // Replace (or create) a numeric value in a sheet1.xml <c> cell. Preserves the
@@ -1672,7 +1610,39 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-function renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overallError) {
+function renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overallError, warnings = { duplicates: [], idConflicts: [] }) {
+  const { duplicates, idConflicts } = warnings;
+  const conflictBox = idConflicts.length ? `
+      <div class="batch-warn">
+        ⚠ في ${idConflicts.length} موظف الـ ID بتاعه مش ثابت في كل أيامه (غالبًا سحب بالماوس أو ID غلط في صف). اتاخد الـ ID اللي متكرر أكتر — صحّح الشيت لو ده غلط:
+        <table class="preview batch-unmatched">
+          <thead><tr><th>ID المستخدم</th><th>الاسم</th><th>الشيت</th><th>IDs اللي ظهرت</th></tr></thead>
+          <tbody>
+            ${idConflicts.map(c => `<tr>
+              <td>${escapeHtml(c.id)}</td>
+              <td>${escapeHtml(c.name)}</td>
+              <td>${escapeHtml(c.source)}</td>
+              <td>${escapeHtml(c.seen.length > 4 ? `${c.seen.slice(0, 3).join('، ')} … ${c.seen[c.seen.length - 1]} (${c.seen.length})` : c.seen.join('، '))}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : '';
+  const duplicateBox = duplicates.length ? `
+      <div class="batch-warn">
+        ⚠ في ${duplicates.length} ID موجود في أكتر من بلوك — اتجمعت أرقامهم. اتأكد إن ده مقصود (مش نفس الشيت مرفوع مرتين):
+        <table class="preview batch-unmatched">
+          <thead><tr><th>ID</th><th>الاسم</th><th>الشيتات</th><th>ساعات OT</th><th>أيام</th></tr></thead>
+          <tbody>
+            ${duplicates.map(u => `<tr>
+              <td>${escapeHtml(u.id)}</td>
+              <td>${escapeHtml(u.name)}</td>
+              <td>${escapeHtml(u.source)}</td>
+              <td>${round2(u.hours || 0)}</td>
+              <td>${round2(u.days || 0)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : '';
   const el = document.getElementById('batch-summary');
   const processedDepts = batch.depts.filter(s => s.processed).length;
   const hasOverall = !!batch.overallOutBytes;
@@ -1691,6 +1661,8 @@ function renderBatchSummary(totalEmps, totalDays, filledRows, unmatched, overall
     </div>
     ${filledNoneWarning}
     ${errorBox}
+    ${conflictBox}
+    ${duplicateBox}
     ${unmatched.length > 0 ? `
       <div class="batch-warn">
         ⚠ في ${unmatched.length} موظف من شيتات الأقسام مالقاش له صف في شيت المصنع — تأكد إن الـ ID موجود في عمود A بنفس الرقم:
